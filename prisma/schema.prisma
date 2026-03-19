@@ -1,0 +1,534 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   Int               @id @default(autoincrement())
+  email                String            @unique @db.VarChar(255)
+  passwordHash         String            @map("password_hash") @db.VarChar(255)
+  fullName             String            @map("full_name") @db.VarChar(255)
+  isActive             Boolean           @default(true) @map("is_active")
+  createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration   Int?              @map("user_id_registration")
+  dateTimeRegistration DateTime          @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?              @map("user_id_modification")
+  dateTimeModification DateTime?         @map("date_time_modification") @db.Timestamptz(6)
+  entity               String?           @db.VarChar(500)
+  auditLogs            AuditLog[]        @relation("AuditActor")
+  ownedCases           Case[]            @relation("CaseOwner")
+  clientProfile        ClientProfile?
+  custodyEvents        CustodyEvent[]    @relation("CustodyActor")
+  ownedEvidence        Evidence[]        @relation("EvidenceOwner")
+  exports              Export[]          @relation("ExportRequester")
+  generated_actas      generated_actas[]
+  sessions             Session[]
+  userRoles            UserRole[]
+
+  @@map("users")
+}
+
+model Role {
+  id                   Int              @id @default(autoincrement())
+  name                 RoleName         @unique
+  description          String?          @db.VarChar(255)
+  userIdRegistration   Int?             @map("user_id_registration")
+  dateTimeRegistration DateTime         @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?             @map("user_id_modification")
+  dateTimeModification DateTime?        @map("date_time_modification") @db.Timestamptz(6)
+  rolePermissions      RolePermission[]
+  userRoles            UserRole[]
+
+  @@map("roles")
+}
+
+model UserRole {
+  userId               Int       @map("user_id")
+  roleId               Int       @map("role_id")
+  userIdRegistration   Int?      @map("user_id_registration")
+  dateTimeRegistration DateTime  @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?      @map("user_id_modification")
+  dateTimeModification DateTime? @map("date_time_modification") @db.Timestamptz(6)
+  role                 Role      @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model ClientProfile {
+  id                   Int       @id @default(autoincrement())
+  userId               Int       @unique @map("user_id")
+  dni                  String?   @db.VarChar(20)
+  ruc                  String?   @db.VarChar(20)
+  phone                String?   @db.VarChar(20)
+  address              String?
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration   Int?      @map("user_id_registration")
+  dateTimeRegistration DateTime  @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?      @map("user_id_modification")
+  dateTimeModification DateTime? @map("date_time_modification") @db.Timestamptz(6)
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("client_profiles")
+}
+
+model Case {
+  id                   Int        @id @default(autoincrement())
+  ownerUserId          Int        @map("owner_user_id")
+  title                String     @db.VarChar(255)
+  description          String?
+  createdAt            DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration   Int?       @map("user_id_registration")
+  dateTimeRegistration DateTime   @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?       @map("user_id_modification")
+  dateTimeModification DateTime?  @map("date_time_modification") @db.Timestamptz(6)
+  internalCode         String?    @unique @map("internal_code") @db.VarChar(50)
+  owner                User       @relation("CaseOwner", fields: [ownerUserId], references: [id])
+  evidence             Evidence[]
+  exports              Export[]   @relation("ExportCase")
+
+  @@map("cases")
+}
+
+model Evidence {
+  id                           Int                            @id @default(autoincrement())
+  ownerUserId                  Int                            @map("owner_user_id")
+  caseId                       Int?                           @map("case_id")
+  title                        String?                        @db.VarChar(255)
+  description                  String?
+  sourceType                   SourceType                     @default(OTHER) @map("source_type")
+  status                       EvidenceStatus                 @default(RECEIVED)
+  isPublic                     Boolean                        @default(true) @map("is_public")
+  createdAt                    DateTime                       @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration           Int?                           @map("user_id_registration")
+  dateTimeRegistration         DateTime                       @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification           Int?                           @map("user_id_modification")
+  dateTimeModification         DateTime?                      @map("date_time_modification") @db.Timestamptz(6)
+  uuid                         String                         @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contact_email                String?                        @db.VarChar(255)
+  contact_phone                String?                        @db.VarChar(50)
+  custodyEvents                CustodyEvent[]
+  case                         Case?                          @relation(fields: [caseId], references: [id])
+  owner                        User                           @relation("EvidenceOwner", fields: [ownerUserId], references: [id])
+  evidence_contributor_records evidence_contributor_records[]
+  files                        EvidenceFile[]
+  exportItems                  ExportItem[]
+  exports                      Export[]                       @relation("ExportEvidence")
+  generated_actas              generated_actas[]
+  metadataReports              MetadataReport[]
+  riskReports                  RiskReport[]
+
+  @@index([ownerUserId])
+  @@index([caseId])
+  @@index([status])
+  @@map("evidence")
+}
+
+model EvidenceFile {
+  id                   Int          @id @default(autoincrement())
+  evidenceId           Int          @map("evidence_id")
+  fileRole             FileRole     @map("file_role")
+  version              Int          @default(1)
+  storageKey           String       @map("storage_key") @db.VarChar(500)
+  originalFilename     String       @map("original_filename") @db.VarChar(255)
+  mimeType             String       @map("mime_type") @db.VarChar(100)
+  sizeBytes            BigInt       @map("size_bytes")
+  isEncrypted          Boolean      @default(false) @map("is_encrypted")
+  createdAt            DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration   Int?         @map("user_id_registration")
+  dateTimeRegistration DateTime     @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?         @map("user_id_modification")
+  dateTimeModification DateTime?    @map("date_time_modification") @db.Timestamptz(6)
+  evidence             Evidence     @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+  exports              Export[]     @relation("ExportFile")
+  hashRecords          HashRecord[]
+
+  @@index([evidenceId])
+  @@index([fileRole])
+  @@map("evidence_files")
+}
+
+model HashRecord {
+  id                   Int           @id @default(autoincrement())
+  evidenceFileId       Int           @map("evidence_file_id")
+  algorithm            HashAlgorithm @default(SHA256)
+  hashHex              String        @map("hash_hex") @db.VarChar(64)
+  computedAt           DateTime      @default(now()) @map("computed_at") @db.Timestamptz(6)
+  userIdRegistration   Int?          @map("user_id_registration")
+  dateTimeRegistration DateTime      @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?          @map("user_id_modification")
+  dateTimeModification DateTime?     @map("date_time_modification") @db.Timestamptz(6)
+  evidenceFile         EvidenceFile  @relation(fields: [evidenceFileId], references: [id], onDelete: Cascade)
+
+  @@index([hashHex])
+  @@map("hash_records")
+}
+
+model CustodyEvent {
+  id                    Int              @id @default(autoincrement())
+  evidenceId            Int              @map("evidence_id")
+  actorUserId           Int?             @map("actor_user_id")
+  actorType             ActorType        @default(USER) @map("actor_type")
+  eventType             CustodyEventType @map("event_type")
+  eventAt               DateTime         @default(now()) @map("event_at") @db.Timestamptz(6)
+  details               Json?
+  prevEventHash         String?          @map("prev_event_hash") @db.VarChar(64)
+  eventHash             String           @map("event_hash") @db.VarChar(64)
+  userIdRegistration    Int?             @map("user_id_registration")
+  dateTimeRegistration  DateTime         @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification    Int?             @map("user_id_modification")
+  dateTimeModification  DateTime?        @map("date_time_modification") @db.Timestamptz(6)
+  eventUuid             String           @unique @default(dbgenerated("gen_random_uuid()")) @map("event_uuid") @db.Uuid
+  sequence              Int              @map("sequence")
+  eventHashAlgorithm    String           @default("SHA-256") @map("event_hash_algorithm") @db.VarChar(20)
+  eventCanonicalization String           @default("JCS-RFC8785") @map("event_canonicalization") @db.VarChar(30)
+  actorDisplayName      String?          @map("actor_display_name") @db.VarChar(255)
+  actor                 User?            @relation("CustodyActor", fields: [actorUserId], references: [id])
+  evidence              Evidence         @relation(fields: [evidenceId], references: [id])
+
+  @@unique([evidenceId, sequence])
+  @@unique([evidenceId, eventHash])
+  @@index([evidenceId])
+  @@index([eventAt])
+  @@index([actorDisplayName], map: "idx_custody_events_actor_display_name")
+  @@map("custody_events")
+}
+
+model SigningKey {
+  id                Int      @id @default(autoincrement())
+  fingerprint       String   @unique @db.VarChar(64)
+  algorithm         String   @db.VarChar(30)
+  publicKeyPem      String   @map("public_key_pem")
+  privateKeyEnc     String   @map("private_key_enc")
+  privateKeyIv      String   @map("private_key_iv") @db.VarChar(32)
+  privateKeyAuthTag String   @map("private_key_auth_tag") @db.VarChar(32)
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("signing_keys")
+}
+
+model Export {
+  id                   Int           @id @default(autoincrement())
+  requestedByUserId    Int           @map("requested_by_user_id")
+  scope                ExportScope
+  evidenceId           Int?          @map("evidence_id")
+  caseId               Int?          @map("case_id")
+  status               ExportStatus  @default(CREATING)
+  exportFileId         Int?          @map("export_file_id")
+  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration   Int?          @map("user_id_registration")
+  dateTimeRegistration DateTime      @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?          @map("user_id_modification")
+  dateTimeModification DateTime?     @map("date_time_modification") @db.Timestamptz(6)
+  items                ExportItem[]
+  case                 Case?         @relation("ExportCase", fields: [caseId], references: [id])
+  evidence             Evidence?     @relation("ExportEvidence", fields: [evidenceId], references: [id])
+  exportFile           EvidenceFile? @relation("ExportFile", fields: [exportFileId], references: [id])
+  requestedBy          User          @relation("ExportRequester", fields: [requestedByUserId], references: [id])
+
+  @@map("exports")
+}
+
+model ExportItem {
+  exportId             Int       @map("export_id")
+  evidenceId           Int       @map("evidence_id")
+  userIdRegistration   Int?      @map("user_id_registration")
+  dateTimeRegistration DateTime  @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?      @map("user_id_modification")
+  dateTimeModification DateTime? @map("date_time_modification") @db.Timestamptz(6)
+  evidence             Evidence  @relation(fields: [evidenceId], references: [id])
+  export               Export    @relation(fields: [exportId], references: [id], onDelete: Cascade)
+
+  @@id([exportId, evidenceId])
+  @@map("export_items")
+}
+
+model AuditLog {
+  id                   Int       @id @default(autoincrement())
+  actorUserId          Int?      @map("actor_user_id")
+  action               String    @db.VarChar(100)
+  entityType           String    @map("entity_type") @db.VarChar(50)
+  entityId             Int?      @map("entity_id")
+  performedAt          DateTime  @default(now()) @map("performed_at") @db.Timestamptz(6)
+  ipAddress            String?   @map("ip_address") @db.VarChar(45)
+  userAgent            String?   @map("user_agent")
+  metadata             Json?
+  userIdRegistration   Int?      @map("user_id_registration")
+  dateTimeRegistration DateTime  @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?      @map("user_id_modification")
+  dateTimeModification DateTime? @map("date_time_modification") @db.Timestamptz(6)
+  actor                User?     @relation("AuditActor", fields: [actorUserId], references: [id])
+
+  @@index([actorUserId])
+  @@index([performedAt])
+  @@index([entityType, entityId])
+  @@map("audit_log")
+}
+
+model MetadataReport {
+  id                   Int       @id @default(autoincrement())
+  evidenceId           Int       @map("evidence_id")
+  version              Int       @default(1)
+  reportJson           Json      @map("report_json")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration   Int?      @map("user_id_registration")
+  dateTimeRegistration DateTime  @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?      @map("user_id_modification")
+  dateTimeModification DateTime? @map("date_time_modification") @db.Timestamptz(6)
+  evidence             Evidence  @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@map("metadata_reports")
+}
+
+model RiskReport {
+  id                   Int       @id @default(autoincrement())
+  evidenceId           Int       @map("evidence_id")
+  version              Int       @default(1)
+  rulesTriggered       Json      @map("rules_triggered")
+  summary              String
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration   Int?      @map("user_id_registration")
+  dateTimeRegistration DateTime  @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?      @map("user_id_modification")
+  dateTimeModification DateTime? @map("date_time_modification") @db.Timestamptz(6)
+  evidence             Evidence  @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@map("risk_reports")
+}
+
+model Session {
+  id                   Int       @id @default(autoincrement())
+  userId               Int       @map("user_id")
+  token                String    @db.VarChar(500)
+  expiresAt            DateTime  @map("expires_at") @db.Timestamptz(6)
+  ipAddress            String?   @map("ip_address") @db.VarChar(45)
+  userAgent            String?   @map("user_agent")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  userIdRegistration   Int?      @map("user_id_registration")
+  dateTimeRegistration DateTime  @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?      @map("user_id_modification")
+  dateTimeModification DateTime? @map("date_time_modification") @db.Timestamptz(6)
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Permission {
+  id                   Int              @id @default(autoincrement())
+  code                 String           @unique @db.VarChar(100)
+  name                 String           @db.VarChar(255)
+  type                 String           @db.VarChar(50)
+  resource             String           @db.VarChar(100)
+  isActive             Boolean          @default(true) @map("is_active")
+  userIdRegistration   Int?             @map("user_id_registration")
+  dateTimeRegistration DateTime         @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?             @map("user_id_modification")
+  dateTimeModification DateTime?        @map("date_time_modification") @db.Timestamptz(6)
+  rolePermissions      RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId               Int        @map("role_id")
+  permissionId         Int        @map("permission_id")
+  isActive             Boolean    @default(true) @map("is_active")
+  userIdRegistration   Int?       @map("user_id_registration")
+  dateTimeRegistration DateTime   @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?       @map("user_id_modification")
+  dateTimeModification DateTime?  @map("date_time_modification") @db.Timestamptz(6)
+  permission           Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  role                 Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model custody_events_details_backup {
+  id           Int?
+  event_uuid   String?   @db.Uuid
+  details      Json?
+  backed_up_at DateTime? @db.Timestamptz(6)
+
+  @@ignore
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model evidence_contributor_records {
+  id                         Int                        @id @default(autoincrement())
+  evidence_id                Int
+  acta_lugar                 String                     @db.VarChar(500)
+  acta_entidad_interviniente String                     @db.VarChar(500)
+  usuario_entidad            String?                    @db.VarChar(500)
+  aportante_nombre_completo  String                     @db.VarChar(255)
+  aportante_documento_tipo   String?                    @default("DNI") @db.VarChar(50)
+  aportante_documento_numero String                     @db.VarChar(50)
+  aportante_condicion        enum_contributor_condition
+  aportante_condicion_otro   String?                    @db.VarChar(255)
+  aportante_domicilio        String?                    @db.VarChar(500)
+  aportante_telefono         String?                    @db.VarChar(50)
+  aportante_correo           String?                    @db.VarChar(255)
+  dispositivo_origen         String?                    @db.VarChar(500)
+  fecha_obtencion_archivo    DateTime?                  @db.Date
+  created_at                 DateTime?                  @default(now()) @db.Timestamptz(6)
+  user_id_registration       Int?
+  date_time_registration     DateTime?                  @default(now()) @db.Timestamptz(6)
+  user_id_modification       Int?
+  date_time_modification     DateTime?                  @db.Timestamptz(6)
+  evidence                   Evidence                   @relation(fields: [evidence_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  generated_actas            generated_actas[]
+
+  @@index([evidence_id], map: "idx_contributor_evidence_id")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model generated_actas {
+  id                           Int                          @id @default(autoincrement())
+  evidence_id                  Int
+  contributor_record_id        Int
+  acta_uuid                    String?                      @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  acta_numero                  String?                      @db.VarChar(50)
+  pdf_hash_sha256              String?                      @db.VarChar(64)
+  pdf_storage_key              String?                      @db.VarChar(500)
+  pdf_size_bytes               BigInt?
+  generated_at                 DateTime?                    @default(now()) @db.Timestamptz(6)
+  generated_by_user_id         Int?
+  user_id_registration         Int?
+  date_time_registration       DateTime?                    @default(now()) @db.Timestamptz(6)
+  user_id_modification         Int?
+  date_time_modification       DateTime?                    @db.Timestamptz(6)
+  evidence_contributor_records evidence_contributor_records @relation(fields: [contributor_record_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  evidence                     Evidence                     @relation(fields: [evidence_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users                        User?                        @relation(fields: [generated_by_user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([contributor_record_id], map: "idx_generated_actas_contributor")
+  @@index([evidence_id], map: "idx_generated_actas_evidence")
+  @@index([acta_uuid], map: "idx_generated_actas_uuid")
+}
+
+enum RoleName {
+  SUPER_ADMIN
+  CLIENT
+
+  @@map("enum_role_name")
+}
+
+enum SourceType {
+  PDF
+  IMAGE
+  VIDEO
+  AUDIO
+  CHAT
+  ZIP
+  OTHER
+
+  @@map("enum_source_type")
+}
+
+enum EvidenceStatus {
+  RECEIVED
+  SCANNED_OK
+  HASHED
+  CLONED_BITCOPY
+  SEALED
+  ANALYZED
+  READY_FOR_EXPORT
+  EXPORTED
+  ERROR
+
+  @@map("enum_evidence_status")
+}
+
+enum FileRole {
+  ORIGINAL
+  BITCOPY
+  WORKING_COPY
+  SEALED
+  CERT_PDF
+  CERT_JSON
+  METADATA_REPORT
+  RISK_REPORT
+  EXPORT_ZIP
+  EVENTLOG
+  CERT_TXT
+
+  @@map("enum_file_role")
+}
+
+enum HashAlgorithm {
+  SHA256
+
+  @@map("enum_hash_algorithm")
+}
+
+enum ActorType {
+  USER
+  SYSTEM
+  PUBLIC
+
+  @@map("enum_actor_type")
+}
+
+enum CustodyEventType {
+  UPLOAD
+  SCAN_OK
+  SCAN_FAILED
+  HASH_COMPUTED
+  BITCOPY_CREATED
+  SEAL_CREATED
+  METADATA_CREATED
+  RISK_REPORT_CREATED
+  READY_FOR_EXPORT
+  EXPORT_CREATED
+  DOWNLOAD
+  PUBLIC_VERIFY
+  REGENERATE_VERSION
+  ERROR
+  VISIBILITY_CHANGE
+  DELETE
+  EXPORT
+  EXPORT_CUSTODY
+  CRYPTO_SEAL_CREATED
+  READY_EXPORT
+  MANIFEST_SIGNED
+  SCAN
+  HASH_CALCULATED
+  SEALED_DOC_CREATED
+  METADATA_EXTRACTED
+
+  @@map("enum_custody_event_type")
+}
+
+enum ExportScope {
+  SINGLE_EVIDENCE
+  CASE
+  MULTIPLE_EVIDENCE
+
+  @@map("enum_export_scope")
+}
+
+enum ExportStatus {
+  CREATING
+  READY
+  ERROR
+  DOWNLOADED
+
+  @@map("enum_export_status")
+}
+
+enum enum_contributor_condition {
+  TESTIGO
+  AGRAVIADO
+  DENUNCIANTE
+  TERCERO
+  OTRO
+}

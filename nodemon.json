@@ -1,0 +1,5 @@
+{
+  "watch": ["*.js", "config/", "controllers/", "middleware/", "models/", "routes/", "services/", "jobs/"],
+  "ignore": ["uploads/", "node_modules/", "*.log", "prisma/migrations/"],
+  "ext": "js,json"
+}
