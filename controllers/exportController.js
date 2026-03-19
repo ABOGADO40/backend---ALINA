@@ -273,9 +273,11 @@ const createExport = async (req, res) => {
       });
     }
 
-    // Verificar acceso a todas las evidencias
+    // Verificar acceso a todas las evidencias (por ownerUserId directo o por caso)
     if (!req.user.roles.includes('SUPER_ADMIN')) {
-      const unauthorized = evidences.filter(e => e.case.ownerUserId !== req.user.id);
+      const unauthorized = evidences.filter(e =>
+        e.ownerUserId !== req.user.id && e.case?.ownerUserId !== req.user.id
+      );
       if (unauthorized.length > 0) {
         return res.status(403).json({
           success: false,
