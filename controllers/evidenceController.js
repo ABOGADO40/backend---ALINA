@@ -36,19 +36,24 @@ const listEvidences = async (req, res) => {
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const take = parseInt(limit);
 
-    // Construir filtros
+    // Construir filtros con AND para combinar condiciones sin conflicto
     const where = {};
+    const andConditions = [];
 
     // Filtrar por caso si se especifica
     if (caseId) {
       where.caseId = parseInt(caseId);
     }
 
-    // Si no es SUPER_ADMIN, solo ver evidencias de sus casos
+    // Si no es SUPER_ADMIN, solo ver evidencias propias (subidas por el usuario)
+    // o evidencias de casos que le pertenecen
     if (!req.user.roles.includes('SUPER_ADMIN')) {
-      where.case = {
-        ownerUserId: req.user.id
-      };
+      andConditions.push({
+        OR: [
+          { ownerUserId: req.user.id },
+          { case: { ownerUserId: req.user.id } }
+        ]
+      });
     }
 
     if (status) {
@@ -60,10 +65,16 @@ const listEvidences = async (req, res) => {
     }
 
     if (search) {
-      where.OR = [
-        { title: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } }
-      ];
+      andConditions.push({
+        OR: [
+          { title: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } }
+        ]
+      });
+    }
+
+    if (andConditions.length > 0) {
+      where.AND = andConditions;
     }
 
     // Ejecutar consultas
