@@ -504,6 +504,7 @@ enum CustodyEventType {
   HASH_CALCULATED
   SEALED_DOC_CREATED
   METADATA_EXTRACTED
+  UPLOAD_GOOGLE_DRIVE
 
   @@map("enum_custody_event_type")
 }
