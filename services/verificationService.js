@@ -5,12 +5,10 @@
 // ============================================================================
 
 const { PrismaClient } = require('@prisma/client');
-const fs = require('fs');
 const forensicUtils = require('../utils/forensicUtils');
 const signingService = require('./signingService');
 const custodyService = require('./custodyService');
 const storageService = require('./storageService');
-const { getFullPath } = require('../config/storage');
 
 const prisma = new PrismaClient();
 
@@ -638,9 +636,8 @@ class VerificationService {
         details.metadataCheck = { storageObjectId: metadataStorageId, expectedHash: metadataExpectedHash };
 
         try {
-          const fullPath = getFullPath(metadataStorageId);
-          if (fs.existsSync(fullPath)) {
-            const content = await fs.promises.readFile(fullPath, 'utf8');
+          if (await storageService.exists(metadataStorageId)) {
+            const content = await storageService.getString(metadataStorageId);
             const computedHash = forensicUtils.computeSha256Hex(content);
             details.metadataCheck.computedHash = computedHash;
             details.metadataCheck.valid = computedHash === metadataExpectedHash;
@@ -668,9 +665,8 @@ class VerificationService {
         details.riskReportCheck = { storageObjectId: riskStorageId, expectedHash: riskExpectedHash };
 
         try {
-          const fullPath = getFullPath(riskStorageId);
-          if (fs.existsSync(fullPath)) {
-            const content = await fs.promises.readFile(fullPath, 'utf8');
+          if (await storageService.exists(riskStorageId)) {
+            const content = await storageService.getString(riskStorageId);
             const computedHash = forensicUtils.computeSha256Hex(content);
             details.riskReportCheck.computedHash = computedHash;
             details.riskReportCheck.valid = computedHash === riskExpectedHash;
@@ -742,15 +738,13 @@ class VerificationService {
       details.storageObjectId = eventlogStorageId;
       details.expectedHash = eventlogExpectedHash;
 
-      const fullPath = getFullPath(eventlogStorageId);
-
-      if (!fs.existsSync(fullPath)) {
+      if (!(await storageService.exists(eventlogStorageId))) {
         errors.push(`Eventlog no encontrado en storage: ${eventlogStorageId}`);
         return { valid: false, errors, details };
       }
 
-      // Leer eventlog desde storage
-      const content = await fs.promises.readFile(fullPath, 'utf8');
+      // Leer eventlog desde S3
+      const content = await storageService.getString(eventlogStorageId);
       const computedHash = forensicUtils.computeSha256Hex(content);
 
       details.computedHash = computedHash;

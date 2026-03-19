@@ -3,7 +3,6 @@
 // Sistema PRUEBA DIGITAL
 // ============================================================================
 
-const fs = require('fs');
 const path = require('path');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const QRCode = require('qrcode');
@@ -12,7 +11,7 @@ const storageService = require('./storageService');
 const hashService = require('./hashService');
 const signingService = require('./signingService');
 const custodyService = require('./custodyService');
-const { STORAGE_STRUCTURE, generateStorageKey, getFullPath } = require('../config/storage');
+const { STORAGE_STRUCTURE, generateStorageKey } = require('../config/storage');
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
@@ -189,20 +188,12 @@ class SealingService {
 
     // Guardar archivo sellado
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.SEALED, evidenceId, sealedFilename);
-    const fullPath = getFullPath(storageKey);
 
-    // Crear directorio
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-
-    // Escribir archivo temporal
-    const tempPath = `${fullPath}.tmp`;
-    await fs.promises.writeFile(tempPath, sealedPdfBytes);
+    // Upload directamente a S3
+    await storageService.putBuffer(storageKey, sealedPdfBytes, 'application/pdf');
 
     // Calcular hash del archivo sellado
     const sealedHash = hashService.calculateFromBuffer(sealedPdfBytes);
-
-    // Mover a ubicacion final (sin cifrar para permitir visualizacion)
-    await fs.promises.rename(tempPath, fullPath);
 
     return {
       storageKey,
@@ -280,10 +271,8 @@ class SealingService {
 
     // Guardar archivo sellado
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.SEALED, evidenceId, sealedFilename);
-    const fullPath = getFullPath(storageKey);
 
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, sealedImage);
+    await storageService.putBuffer(storageKey, sealedImage, 'image/png');
 
     const sealedHash = hashService.calculateFromBuffer(sealedImage);
 
@@ -385,10 +374,8 @@ class SealingService {
 
     const certFilename = `cert_${evidenceId}_v${version}.pdf`;
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.SEALED, evidenceId, certFilename);
-    const fullPath = getFullPath(storageKey);
 
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, pdfBytes);
+    await storageService.putBuffer(storageKey, pdfBytes, 'application/pdf');
 
     return {
       storageKey,
@@ -413,10 +400,8 @@ class SealingService {
     const txtContent = this._generateCertificateTxt(evidenceId, evidenceData, timestamp, version);
     const txtFilename = `cert_${evidenceId}_v${version}.txt`;
     const txtStorageKey = generateStorageKey(STORAGE_STRUCTURE.CERTIFICATES, evidenceId, txtFilename);
-    const txtFullPath = getFullPath(txtStorageKey);
 
-    await fs.promises.mkdir(path.dirname(txtFullPath), { recursive: true });
-    await fs.promises.writeFile(txtFullPath, txtContent);
+    await storageService.putString(txtStorageKey, txtContent);
 
     results.push({
       fileRole: 'CERT_TXT',
@@ -563,10 +548,8 @@ SHA-256 del archivo original con el registrado en el sistema.
     const pdfBytes = await pdfDoc.save();
     const pdfFilename = `cert_${evidenceId}_v${version}.pdf`;
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.CERTIFICATES, evidenceId, pdfFilename);
-    const fullPath = getFullPath(storageKey);
 
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, pdfBytes);
+    await storageService.putBuffer(storageKey, pdfBytes, 'application/pdf');
 
     return {
       storageKey,
@@ -729,9 +712,7 @@ SHA-256 del archivo original con el registrado en el sistema.
 
     // PERSISTIR eventlog en storage (Regla E: eventlog verificable)
     // El archivo DEBE existir en el storageObjectId declarado en el manifest
-    const eventlogFullPath = getFullPath(eventlogStorageObjectId);
-    await fs.promises.mkdir(path.dirname(eventlogFullPath), { recursive: true });
-    await fs.promises.writeFile(eventlogFullPath, eventlogContent, 'utf8');
+    await storageService.putString(eventlogStorageObjectId, eventlogContent);
     console.log(`[SealingService] Eventlog persistido en storage: ${eventlogStorageObjectId}`);
 
     // Crear registro EvidenceFile para el eventlog (trazabilidad)

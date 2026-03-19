@@ -6,7 +6,6 @@
 const fs = require('fs');
 const path = require('path');
 const archiver = require('archiver');
-const crypto = require('crypto');
 const { prisma } = require('../config/db');
 const storageService = require('./storageService');
 const hashService = require('./hashService');
@@ -15,7 +14,7 @@ const sealingService = require('./sealingService');
 const signingService = require('./signingService');
 const actaService = require('./actaService');
 const forensicUtils = require('../utils/forensicUtils');
-const { STORAGE_STRUCTURE, generateStorageKey, getFullPath } = require('../config/storage');
+const { STORAGE_STRUCTURE, generateStorageKey, UPLOAD_BASE_DIR } = require('../config/storage');
 
 // Registrar formato de ZIP encriptado
 const archiverZipEncrypted = require('archiver-zip-encrypted');
@@ -42,13 +41,12 @@ class ExportService {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const zipFilename = `export_${exportId}_${timestamp}.zip`;
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.EXPORTS, exportId, zipFilename);
-    const tempPath = getFullPath(storageKey) + '.tmp';
-    const finalPath = getFullPath(storageKey);
+    const tempPath = path.join(UPLOAD_BASE_DIR, 'temp', `export_${exportId}_${Date.now()}.zip.tmp`);
 
     console.log(`[ExportService] Iniciando exportacion #${exportId}`);
     console.log(`[ExportService] Evidencias: ${evidenceIds.join(', ')}`);
 
-    // Crear directorio
+    // Crear directorio temporal
     await fs.promises.mkdir(path.dirname(tempPath), { recursive: true });
 
     // Construir el ZIP
@@ -118,16 +116,17 @@ class ExportService {
     archive.finalize();
     await archivePromise;
 
-    // Mover a ubicacion final
-    await fs.promises.rename(tempPath, finalPath);
-    console.log(`[ExportService] ZIP movido a: ${finalPath}`);
-
-    // Obtener tamano final
-    const stats = await fs.promises.stat(finalPath);
+    // Read temp file and upload to S3
+    const zipBuffer = await fs.promises.readFile(tempPath);
+    await storageService.putBuffer(storageKey, zipBuffer, 'application/zip');
+    // Clean up local temp
+    await fs.promises.unlink(tempPath);
+    const stats = { size: zipBuffer.length };
+    console.log(`[ExportService] ZIP subido a S3: ${storageKey}`);
     console.log(`[ExportService] Tamano: ${stats.size} bytes`);
 
-    // Calcular hash del ZIP
-    const zipHash = await this._calculateFileHash(finalPath);
+    // Calcular hash del ZIP desde buffer
+    const zipHash = hashService.calculateFromBuffer(zipBuffer);
     console.log(`[ExportService] Hash: ${zipHash}`);
 
     // Crear registro de archivo en la base de datos
@@ -413,10 +412,10 @@ class ExportService {
       for (const acta of generatedActas) {
         if (acta.pdf_storage_key) {
           try {
-            const actaPath = getFullPath(acta.pdf_storage_key);
-            if (fs.existsSync(actaPath)) {
+            if (await storageService.exists(acta.pdf_storage_key)) {
+              const actaBuffer = await storageService.getBuffer(acta.pdf_storage_key);
               const actaFilename = `acta_obtencion_${acta.acta_numero || acta.id}.pdf`;
-              archive.file(actaPath, { name: `${actasFolder}/01_actas_obtencion/${actaFilename}` });
+              archive.append(actaBuffer, { name: `${actasFolder}/01_actas_obtencion/${actaFilename}` });
               manifest.contents.push({
                 path: `${actasFolder}/01_actas_obtencion/${actaFilename}`,
                 role: 'ACTA_OBTENCION',
@@ -434,9 +433,9 @@ class ExportService {
       // 2. Certificado de Evidencia Digital (generar PDF)
       try {
         const certResult = await actaService.generateCertificadoPdf(evidenceId, evidence.ownerUserId);
-        const certPath = getFullPath(certResult.storageKey);
-        if (fs.existsSync(certPath)) {
-          archive.file(certPath, { name: `${actasFolder}/02_certificado/${certResult.filename}` });
+        if (await storageService.exists(certResult.storageKey)) {
+          const certBuffer = await storageService.getBuffer(certResult.storageKey);
+          archive.append(certBuffer, { name: `${actasFolder}/02_certificado/${certResult.filename}` });
           manifest.contents.push({
             path: `${actasFolder}/02_certificado/${certResult.filename}`,
             role: 'CERTIFICADO_EVIDENCIA_DIGITAL',
@@ -458,9 +457,9 @@ class ExportService {
       // 3. Reporte de Cadena de Custodia (generar PDF)
       try {
         const custodiaResult = await actaService.generateCadenaCustodiaPdf(evidenceId, evidence.ownerUserId);
-        const custodiaPath = getFullPath(custodiaResult.storageKey);
-        if (fs.existsSync(custodiaPath)) {
-          archive.file(custodiaPath, { name: `${actasFolder}/03_cadena_custodia/${custodiaResult.filename}` });
+        if (await storageService.exists(custodiaResult.storageKey)) {
+          const custodiaBuffer = await storageService.getBuffer(custodiaResult.storageKey);
+          archive.append(custodiaBuffer, { name: `${actasFolder}/03_cadena_custodia/${custodiaResult.filename}` });
           manifest.contents.push({
             path: `${actasFolder}/03_cadena_custodia/${custodiaResult.filename}`,
             role: 'REPORTE_CADENA_CUSTODIA',
@@ -482,9 +481,9 @@ class ExportService {
       // 4. Reporte de Metadatos (generar PDF)
       try {
         const metadatosResult = await actaService.generateMetadatosPdf(evidenceId, evidence.ownerUserId);
-        const metadatosPath = getFullPath(metadatosResult.storageKey);
-        if (fs.existsSync(metadatosPath)) {
-          archive.file(metadatosPath, { name: `${actasFolder}/04_metadatos/${metadatosResult.filename}` });
+        if (await storageService.exists(metadatosResult.storageKey)) {
+          const metadatosBuffer = await storageService.getBuffer(metadatosResult.storageKey);
+          archive.append(metadatosBuffer, { name: `${actasFolder}/04_metadatos/${metadatosResult.filename}` });
           manifest.contents.push({
             path: `${actasFolder}/04_metadatos/${metadatosResult.filename}`,
             role: 'REPORTE_METADATOS',
@@ -515,26 +514,26 @@ class ExportService {
 
   async _addFileToArchive(archive, fileRecord, archivePath, manifest) {
     try {
-      // Verificar si el archivo existe antes de intentar agregarlo
-      const basePath = getFullPath(fileRecord.storageKey);
-      const filePath = fileRecord.isEncrypted ? `${basePath}.enc` : basePath;
+      // Verificar si el archivo existe en S3 antes de intentar agregarlo
+      const actualKey = fileRecord.isEncrypted ? `${fileRecord.storageKey}.enc` : fileRecord.storageKey;
 
-      if (!fs.existsSync(filePath)) {
+      if (!(await storageService.exists(actualKey))) {
         console.warn(`[ExportService] Archivo no existe, omitiendo: ${archivePath}`);
         manifest.contents.push({
           path: archivePath,
           role: fileRecord.fileRole,
           originalFilename: fileRecord.originalFilename,
           skipped: true,
-          reason: 'Archivo no encontrado en disco'
+          reason: 'Archivo no encontrado en storage'
         });
         return;
       }
 
-      // Para archivos NO encriptados, usar archive.file() directamente
+      // Para archivos NO encriptados, descargar buffer desde S3
       if (!fileRecord.isEncrypted) {
         console.log(`[ExportService] Agregando archivo sin cifrar: ${archivePath}`);
-        archive.file(filePath, { name: archivePath });
+        const buffer = await storageService.getBuffer(fileRecord.storageKey);
+        archive.append(buffer, { name: archivePath });
       } else {
         // Para archivos encriptados, intentar descifrar
         // NOTA: Si el descifrado falla, agregamos placeholder con metadata
@@ -701,11 +700,10 @@ class ExportService {
 
     console.log(`[ExportService] Leyendo eventlog desde storage: ${eventlogStorageObjectId}`);
 
-    const eventlogFullPath = getFullPath(eventlogStorageObjectId);
     let eventlogTxt;
 
     try {
-      eventlogTxt = await fs.promises.readFile(eventlogFullPath, 'utf8');
+      eventlogTxt = await storageService.getString(eventlogStorageObjectId);
       console.log(`[ExportService] eventlog.txt leído: ${eventlogTxt.length} bytes`);
     } catch (readError) {
       console.error(`[ExportService] ERROR leyendo eventlog desde storage: ${readError.message}`);
@@ -1419,37 +1417,19 @@ determinar si realmente representan manipulacion o alteracion del documento.
   }
 
   // ==========================================================================
-  // CALCULAR HASH DE ARCHIVO
-  // ==========================================================================
-
-  async _calculateFileHash(filePath) {
-    return new Promise((resolve, reject) => {
-      const hash = crypto.createHash('sha256');
-      const stream = fs.createReadStream(filePath);
-
-      stream.on('data', chunk => hash.update(chunk));
-      stream.on('end', () => resolve(hash.digest('hex')));
-      stream.on('error', reject);
-    });
-  }
-
-  // ==========================================================================
   // OBTENER STREAM DE DESCARGA
   // ==========================================================================
 
   /**
-   * Obtiene el stream de descarga de un ZIP exportado
+   * Obtiene el stream de descarga de un ZIP exportado desde S3
    * @param {string} storageKey - Clave de almacenamiento
-   * @returns {ReadableStream}
+   * @returns {Promise<ReadableStream>}
    */
-  getDownloadStream(storageKey) {
-    const fullPath = getFullPath(storageKey);
-
-    if (!fs.existsSync(fullPath)) {
+  async getDownloadStream(storageKey) {
+    if (!(await storageService.exists(storageKey))) {
       throw new Error('Archivo de exportacion no encontrado');
     }
-
-    return fs.createReadStream(fullPath);
+    return storageService.getS3Stream(storageKey);
   }
 }
 

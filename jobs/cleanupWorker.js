@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { prisma } = require('../config/db');
 const { UPLOAD_BASE_DIR } = require('../config/storage');
+const storageService = require('../services/storageService');
 
 // ============================================================================
 // CONFIGURACION
@@ -14,7 +15,6 @@ const { UPLOAD_BASE_DIR } = require('../config/storage');
 
 const CLEANUP_INTERVAL_HOURS = 1; // Ejecutar cada hora
 const TEMP_FILE_MAX_AGE_HOURS = 2; // Archivos temp mayores a 2 horas
-const EXPORT_EXPIRY_DAYS = 7; // Exportaciones expiran en 7 dias
 const SESSION_EXPIRY_HOURS = 4; // Sesiones expiran en 4 horas
 
 // ============================================================================
@@ -22,7 +22,7 @@ const SESSION_EXPIRY_HOURS = 4; // Sesiones expiran en 4 horas
 // ============================================================================
 
 /**
- * Limpia archivos temporales de upload
+ * Limpia archivos temporales de upload (local filesystem)
  */
 async function cleanupTempFiles() {
   const tempDir = path.join(UPLOAD_BASE_DIR, 'temp');
@@ -82,53 +82,27 @@ async function cleanupExpiredSessions() {
 }
 
 /**
- * Marca exportaciones expiradas
- */
-async function markExpiredExports() {
-  try {
-    const result = await prisma.export.updateMany({
-      where: {
-        status: 'READY',
-        expiresAt: {
-          lt: new Date()
-        }
-      },
-      data: {
-        status: 'EXPIRED'
-      }
-    });
-
-    return {
-      marked: result.count,
-      message: `${result.count} exportaciones marcadas como expiradas`
-    };
-  } catch (error) {
-    console.error('[CleanupWorker] Error marcando exportaciones:', error);
-    return { marked: 0, error: error.message };
-  }
-}
-
-/**
- * Limpia archivos de exportaciones expiradas (opcional)
+ * Limpia archivos de exportaciones expiradas en S3
  */
 async function cleanupExpiredExportFiles() {
   try {
-    // Obtener exportaciones expiradas hace mas de 30 dias
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
     const expiredExports = await prisma.export.findMany({
       where: {
         status: 'EXPIRED',
-        expiresAt: {
+        createdAt: {
           lt: thirtyDaysAgo
         },
-        storageKey: {
+        exportFileId: {
           not: null
         }
       },
       select: {
         id: true,
-        storageKey: true
+        exportFile: {
+          select: { storageKey: true }
+        }
       }
     });
 
@@ -136,17 +110,10 @@ async function cleanupExpiredExportFiles() {
 
     for (const exp of expiredExports) {
       try {
-        const filePath = path.join(UPLOAD_BASE_DIR, exp.storageKey);
-        if (fs.existsSync(filePath)) {
-          await fs.promises.unlink(filePath);
+        if (exp.exportFile?.storageKey) {
+          await storageService.deleteFile(exp.exportFile.storageKey);
           deleted++;
         }
-
-        // Limpiar referencia
-        await prisma.export.update({
-          where: { id: exp.id },
-          data: { storageKey: null }
-        });
       } catch (e) {
         // Ignorar errores individuales
       }
@@ -154,7 +121,7 @@ async function cleanupExpiredExportFiles() {
 
     return {
       deleted,
-      message: `${deleted} archivos de exportaciones eliminados`
+      message: `${deleted} archivos de exportaciones eliminados de S3`
     };
   } catch (error) {
     console.error('[CleanupWorker] Error limpiando archivos de exportaciones:', error);
@@ -166,9 +133,6 @@ async function cleanupExpiredExportFiles() {
 // EJECUTOR PRINCIPAL
 // ============================================================================
 
-/**
- * Ejecuta todas las tareas de limpieza
- */
 async function runCleanup() {
   console.log('[CleanupWorker] Iniciando tareas de limpieza...');
   const startTime = Date.now();
@@ -176,7 +140,6 @@ async function runCleanup() {
   const results = {
     tempFiles: await cleanupTempFiles(),
     sessions: await cleanupExpiredSessions(),
-    exports: await markExpiredExports(),
     exportFiles: await cleanupExpiredExportFiles()
   };
 
@@ -187,17 +150,12 @@ async function runCleanup() {
   return results;
 }
 
-/**
- * Inicia el worker en modo continuo
- */
 function startWorker() {
   console.log('[CleanupWorker] Iniciando worker de limpieza...');
   console.log(`[CleanupWorker] Intervalo: cada ${CLEANUP_INTERVAL_HOURS} hora(s)`);
 
-  // Ejecutar inmediatamente
   runCleanup().catch(console.error);
 
-  // Programar ejecucion periodica
   const intervalMs = CLEANUP_INTERVAL_HOURS * 60 * 60 * 1000;
   setInterval(() => {
     runCleanup().catch(console.error);
@@ -213,7 +171,6 @@ module.exports = {
   startWorker,
   cleanupTempFiles,
   cleanupExpiredSessions,
-  markExpiredExports,
   cleanupExpiredExportFiles
 };
 
@@ -226,7 +183,6 @@ if (require.main === module) {
   console.log('PRUEBA DIGITAL - Cleanup Worker');
   console.log('='.repeat(60));
 
-  // Ejecutar una vez y salir, o continuo si se pasa --daemon
   if (process.argv.includes('--daemon')) {
     startWorker();
   } else {

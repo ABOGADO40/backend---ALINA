@@ -225,9 +225,14 @@ async function startServer() {
     await connectDatabase();
     console.log('[Server] Base de datos conectada');
 
-    // Inicializar estructura de almacenamiento
+    // Inicializar estructura de almacenamiento local (temp)
     initializeStorageStructure();
-    console.log('[Server] Estructura de almacenamiento inicializada');
+    console.log('[Server] Estructura de almacenamiento local inicializada');
+
+    // Verificar conexion a Wasabi S3
+    const { ensureBucket } = require('./config/wasabi');
+    await ensureBucket();
+    console.log('[Server] Wasabi S3 conectado');
 
     // Iniciar servidor HTTP
     app.listen(PORT, HOST, () => {

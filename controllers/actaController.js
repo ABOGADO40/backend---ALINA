@@ -504,10 +504,8 @@ const downloadCertificado = async (req, res) => {
     const result = await actaService.generateCertificadoPdf(evidenceId, req.user.id);
 
     // Leer el archivo generado
-    const fs = require('fs');
-    const { getFullPath } = require('../config/storage');
-    const fullPath = getFullPath(result.storageKey);
-    const fileBuffer = await fs.promises.readFile(fullPath);
+    const storageService = require('../services/storageService');
+    const fileBuffer = await storageService.getBuffer(result.storageKey);
 
     // Registrar auditoria
     await createAuditLog(
@@ -577,10 +575,8 @@ const downloadCadenaCustodia = async (req, res) => {
     const result = await actaService.generateCadenaCustodiaPdf(evidenceId, req.user.id);
 
     // Leer el archivo generado
-    const fs = require('fs');
-    const { getFullPath } = require('../config/storage');
-    const fullPath = getFullPath(result.storageKey);
-    const fileBuffer = await fs.promises.readFile(fullPath);
+    const storageService = require('../services/storageService');
+    const fileBuffer = await storageService.getBuffer(result.storageKey);
 
     // Registrar auditoria
     await createAuditLog(
@@ -650,10 +646,8 @@ const downloadMetadatos = async (req, res) => {
     const result = await actaService.generateMetadatosPdf(evidenceId, req.user.id);
 
     // Leer el archivo generado
-    const fs = require('fs');
-    const { getFullPath } = require('../config/storage');
-    const fullPath = getFullPath(result.storageKey);
-    const fileBuffer = await fs.promises.readFile(fullPath);
+    const storageService = require('../services/storageService');
+    const fileBuffer = await storageService.getBuffer(result.storageKey);
 
     // Registrar auditoria
     await createAuditLog(

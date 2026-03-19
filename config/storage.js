@@ -136,13 +136,13 @@ const BLOCKED_EXTENSIONS = [
  * Inicializa la estructura de carpetas de almacenamiento
  */
 function initializeStorageStructure() {
-  Object.values(STORAGE_STRUCTURE).forEach(folder => {
-    const folderPath = path.join(UPLOAD_BASE_DIR, folder);
-    if (!fs.existsSync(folderPath)) {
-      fs.mkdirSync(folderPath, { recursive: true });
-      console.log(`[Storage] Carpeta creada: ${folderPath}`);
-    }
-  });
+  // En produccion con Wasabi S3, solo crear directorio temp local (para uploads temporales de Multer)
+  const tempDir = path.join(UPLOAD_BASE_DIR, 'temp');
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+    console.log(`[Storage] Carpeta temp local creada: ${tempDir}`);
+  }
+  console.log('[Storage] Almacenamiento: Wasabi S3 (bucket: prueba-digital-alina)');
 }
 
 /**

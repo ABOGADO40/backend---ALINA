@@ -3,8 +3,6 @@
 // Sistema PRUEBA DIGITAL
 // ============================================================================
 
-const fs = require('fs');
-const path = require('path');
 const { prisma } = require('../config/db');
 const storageService = require('./storageService');
 const hashService = require('./hashService');
@@ -13,7 +11,7 @@ const sealingService = require('./sealingService');
 const metadataService = require('./metadataService');
 const riskAnalysisService = require('./riskAnalysisService');
 const evidenceModel = require('../models/evidenceModel');
-const { STORAGE_STRUCTURE, generateStorageKey, getFullPath } = require('../config/storage');
+const { STORAGE_STRUCTURE, generateStorageKey } = require('../config/storage');
 
 // ============================================================================
 // CONFIGURACION
@@ -426,10 +424,8 @@ class PipelineService {
           'metadata.json'
         );
 
-        // Crear directorio y guardar archivo
-        const metadataFullPath = getFullPath(metadataStorageKey);
-        await fs.promises.mkdir(path.dirname(metadataFullPath), { recursive: true });
-        await fs.promises.writeFile(metadataFullPath, metadataPayloadBytes);
+        // Guardar archivo en storage
+        await storageService.putBuffer(metadataStorageKey, metadataPayloadBytes, 'application/json');
         console.log(`[Pipeline] Metadata payload persistido: ${metadataStorageKey}`);
 
         // Registrar evento de custodia con storageObjectId REAL
@@ -460,10 +456,8 @@ class PipelineService {
           'risk_report.json'
         );
 
-        // Crear directorio y guardar archivo
-        const riskFullPath = getFullPath(riskStorageKey);
-        await fs.promises.mkdir(path.dirname(riskFullPath), { recursive: true });
-        await fs.promises.writeFile(riskFullPath, riskPayloadBytes);
+        // Guardar archivo en storage
+        await storageService.putBuffer(riskStorageKey, riskPayloadBytes, 'application/json');
         console.log(`[Pipeline] Risk report payload persistido: ${riskStorageKey}`);
 
         // Actualizar estado

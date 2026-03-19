@@ -1,100 +1,174 @@
 // ============================================================================
-// STORAGE SERVICE - Manejo de archivos hasta 2GB con cifrado
+// STORAGE SERVICE - Almacenamiento en Wasabi S3 con cifrado
 // Sistema PRUEBA DIGITAL
 // ============================================================================
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { PassThrough, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
-const { Transform } = require('stream');
+const {
+  PutObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  DeleteObjectCommand,
+  DeleteObjectsCommand
+} = require('@aws-sdk/client-s3');
+const { Upload } = require('@aws-sdk/lib-storage');
 
+const { s3, WASABI_BUCKET } = require('../config/wasabi');
 const {
   MAX_FILE_SIZE,
-  CHUNK_SIZE,
-  HASH_BUFFER_SIZE,
   UPLOAD_BASE_DIR,
   STORAGE_STRUCTURE,
   ENCRYPTION_CONFIG,
   generateStorageKey,
-  getFullPath,
   isBlockedExtension
 } = require('../config/storage');
 
 // ============================================================================
-// CLASE PRINCIPAL DE ALMACENAMIENTO
+// CLASE PRINCIPAL DE ALMACENAMIENTO (S3)
 // ============================================================================
 
 class StorageService {
   constructor() {
-    this.uploadBaseDir = UPLOAD_BASE_DIR;
+    this.bucket = WASABI_BUCKET;
   }
 
   // ==========================================================================
-  // GUARDAR ARCHIVO CON STREAMING (para archivos grandes hasta 2GB)
+  // METODOS HELPER DE ALTO NIVEL (usados por otros servicios)
   // ==========================================================================
 
   /**
-   * Guarda un archivo usando streaming para manejar archivos grandes
-   * @param {ReadableStream} readStream - Stream de lectura del archivo
-   * @param {string} folder - Carpeta de destino (ORIGINAL, BITCOPY, etc.)
-   * @param {number} evidenceId - ID de la evidencia
-   * @param {string} originalFilename - Nombre original del archivo
-   * @param {boolean} encrypt - Si se debe cifrar el archivo
-   * @returns {Promise<{storageKey: string, sizeBytes: number, hash: string}>}
+   * Sube un Buffer a S3
    */
+  async putBuffer(storageKey, buffer, contentType = 'application/octet-stream') {
+    await s3.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: storageKey,
+      Body: buffer,
+      ContentType: contentType
+    }));
+  }
+
+  /**
+   * Sube un string a S3
+   */
+  async putString(storageKey, content, contentType = 'text/plain') {
+    await s3.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: storageKey,
+      Body: content,
+      ContentType: contentType
+    }));
+  }
+
+  /**
+   * Descarga un objeto de S3 como Buffer
+   */
+  async getBuffer(storageKey) {
+    const { Body } = await s3.send(new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: storageKey
+    }));
+    return Buffer.from(await Body.transformToByteArray());
+  }
+
+  /**
+   * Descarga un objeto de S3 como string
+   */
+  async getString(storageKey) {
+    const { Body } = await s3.send(new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: storageKey
+    }));
+    return Body.transformToString();
+  }
+
+  /**
+   * Verifica si un objeto existe en S3
+   */
+  async exists(storageKey) {
+    try {
+      await s3.send(new HeadObjectCommand({
+        Bucket: this.bucket,
+        Key: storageKey
+      }));
+      return true;
+    } catch (err) {
+      if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Obtiene un readable stream desde S3
+   */
+  async getS3Stream(storageKey) {
+    const { Body } = await s3.send(new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: storageKey
+    }));
+    return Body;
+  }
+
+  /**
+   * Sube un stream a S3 usando multipart upload (para archivos grandes)
+   */
+  async putStream(storageKey, readStream, contentType = 'application/octet-stream') {
+    const upload = new Upload({
+      client: s3,
+      params: {
+        Bucket: this.bucket,
+        Key: storageKey,
+        Body: readStream,
+        ContentType: contentType
+      },
+      queueSize: 4,
+      partSize: 64 * 1024 * 1024 // 64MB parts
+    });
+    await upload.done();
+  }
+
+  // ==========================================================================
+  // GUARDAR ARCHIVO CON STREAMING Y HASH (para archivos grandes hasta 2GB)
+  // ==========================================================================
+
   async saveFileStream(readStream, folder, evidenceId, originalFilename, encrypt = true) {
-    // Validar extension bloqueada
     if (isBlockedExtension(originalFilename)) {
       throw new Error(`Extension de archivo bloqueada: ${path.extname(originalFilename)}`);
     }
 
-    // Generar storage key
     const storageKey = generateStorageKey(folder, evidenceId, originalFilename);
-    const fullPath = getFullPath(storageKey);
 
-    // Crear directorio si no existe
-    const dirPath = path.dirname(fullPath);
-    await fs.promises.mkdir(dirPath, { recursive: true });
-
-    // Calcular hash SHA-256 mientras se guarda
+    // Calcular hash SHA-256 mientras se procesa
     const hashCalculator = crypto.createHash('sha256');
     let sizeBytes = 0;
 
-    // Transform stream para calcular hash y tamano
     const hashTransform = new Transform({
       transform(chunk, encoding, callback) {
         hashCalculator.update(chunk);
         sizeBytes += chunk.length;
-
-        // Verificar tamano maximo
         if (sizeBytes > MAX_FILE_SIZE) {
           callback(new Error(`Archivo excede el tamano maximo de ${MAX_FILE_SIZE / (1024 * 1024 * 1024)}GB`));
           return;
         }
-
         callback(null, chunk);
       }
     });
 
-    let writeStream;
-    let finalPath = fullPath;
-
     if (encrypt) {
-      // Guardar con cifrado
-      const { encryptedPath, iv, authTag } = await this._saveEncrypted(
-        readStream,
-        hashTransform,
-        fullPath
-      );
-      finalPath = encryptedPath;
-
-      // Guardar metadata de cifrado
-      await this._saveEncryptionMetadata(fullPath, iv, authTag);
+      const { encKey, iv, authTag } = await this._saveEncrypted(readStream, hashTransform, storageKey);
+      // Guardar metadata de cifrado como objeto separado en S3
+      await this._saveEncryptionMetadata(storageKey, iv, authTag);
     } else {
-      // Guardar sin cifrar
-      writeStream = fs.createWriteStream(fullPath);
-      await pipeline(readStream, hashTransform, writeStream);
+      // Pipe through hash transform, then upload to S3
+      const passThrough = new PassThrough();
+      readStream.pipe(hashTransform).pipe(passThrough);
+      await this.putStream(storageKey, passThrough);
     }
 
     const hashHex = hashCalculator.digest('hex');
@@ -111,10 +185,7 @@ class StorageService {
   // CIFRADO DE ARCHIVOS EN REPOSO
   // ==========================================================================
 
-  /**
-   * Guarda un archivo con cifrado AES-256-GCM
-   */
-  async _saveEncrypted(readStream, hashTransform, basePath) {
+  async _saveEncrypted(readStream, hashTransform, storageKey) {
     const key = ENCRYPTION_CONFIG.getKey();
     const iv = crypto.randomBytes(ENCRYPTION_CONFIG.ivLength);
 
@@ -125,25 +196,21 @@ class StorageService {
       { authTagLength: ENCRYPTION_CONFIG.authTagLength }
     );
 
-    const encryptedPath = `${basePath}.enc`;
-    const writeStream = fs.createWriteStream(encryptedPath);
+    const encryptedKey = `${storageKey}.enc`;
 
-    await pipeline(readStream, hashTransform, cipher, writeStream);
+    // Pipeline: readStream -> hashTransform -> cipher -> S3 upload
+    const passThrough = new PassThrough();
+    readStream.pipe(hashTransform).pipe(cipher).pipe(passThrough);
+
+    await this.putStream(encryptedKey, passThrough);
 
     const authTag = cipher.getAuthTag();
 
-    return {
-      encryptedPath,
-      iv,
-      authTag
-    };
+    return { encKey: encryptedKey, iv, authTag };
   }
 
-  /**
-   * Guarda metadata de cifrado (IV y AuthTag) en archivo separado
-   */
-  async _saveEncryptionMetadata(basePath, iv, authTag) {
-    const metadataPath = `${basePath}.meta`;
+  async _saveEncryptionMetadata(storageKey, iv, authTag) {
+    const metadataKey = `${storageKey}.meta`;
     const metadata = {
       algorithm: ENCRYPTION_CONFIG.algorithm,
       iv: iv.toString('base64'),
@@ -151,51 +218,32 @@ class StorageService {
       createdAt: new Date().toISOString()
     };
 
-    await fs.promises.writeFile(metadataPath, JSON.stringify(metadata), 'utf8');
+    await this.putString(metadataKey, JSON.stringify(metadata), 'application/json');
   }
 
   // ==========================================================================
   // LEER ARCHIVO CON STREAMING
   // ==========================================================================
 
-  /**
-   * Lee un archivo usando streaming para manejar archivos grandes
-   * @param {string} storageKey - Clave de almacenamiento
-   * @param {boolean} encrypted - Si el archivo esta cifrado
-   * @returns {ReadableStream}
-   */
   async getFileStream(storageKey, encrypted = true) {
-    const basePath = getFullPath(storageKey);
-
     if (encrypted) {
-      return this._readEncrypted(basePath);
+      return this._readEncrypted(storageKey);
     }
 
-    const fullPath = basePath;
-    if (!fs.existsSync(fullPath)) {
+    const objectExists = await this.exists(storageKey);
+    if (!objectExists) {
       throw new Error(`Archivo no encontrado: ${storageKey}`);
     }
 
-    return fs.createReadStream(fullPath, { highWaterMark: CHUNK_SIZE });
+    return this.getS3Stream(storageKey);
   }
 
-  /**
-   * Lee un archivo cifrado y devuelve stream descifrado
-   */
-  async _readEncrypted(basePath) {
-    const encryptedPath = `${basePath}.enc`;
-    const metadataPath = `${basePath}.meta`;
+  async _readEncrypted(storageKey) {
+    const encryptedKey = `${storageKey}.enc`;
+    const metadataKey = `${storageKey}.meta`;
 
-    if (!fs.existsSync(encryptedPath)) {
-      throw new Error(`Archivo cifrado no encontrado: ${basePath}`);
-    }
-
-    if (!fs.existsSync(metadataPath)) {
-      throw new Error(`Metadata de cifrado no encontrada: ${basePath}`);
-    }
-
-    // Leer metadata
-    const metadataContent = await fs.promises.readFile(metadataPath, 'utf8');
+    // Leer metadata de cifrado
+    const metadataContent = await this.getString(metadataKey);
     const metadata = JSON.parse(metadataContent);
 
     const key = ENCRYPTION_CONFIG.getKey();
@@ -210,13 +258,10 @@ class StorageService {
     );
     decipher.setAuthTag(authTag);
 
-    const readStream = fs.createReadStream(encryptedPath, { highWaterMark: CHUNK_SIZE });
+    const encStream = await this.getS3Stream(encryptedKey);
 
-    // Retornar pipeline de descifrado
-    const { PassThrough } = require('stream');
     const outputStream = new PassThrough();
-
-    pipeline(readStream, decipher, outputStream).catch(err => {
+    pipeline(encStream, decipher, outputStream).catch(err => {
       outputStream.destroy(err);
     });
 
@@ -224,28 +269,17 @@ class StorageService {
   }
 
   // ==========================================================================
-  // GUARDAR ARCHIVO ORIGINAL DESDE PATH (para uploads de Multer)
+  // GUARDAR ARCHIVO ORIGINAL DESDE PATH TEMPORAL (usado por Multer)
   // ==========================================================================
 
-  /**
-   * Guarda un archivo original desde un path temporal (usado por Multer)
-   * @param {string} tempFilePath - Ruta del archivo temporal
-   * @param {number} evidenceId - ID de la evidencia
-   * @param {string} originalFilename - Nombre original del archivo
-   * @param {string} mimeType - Tipo MIME del archivo
-   * @returns {Promise<{storageKey: string, sizeBytes: number, hash: string, isEncrypted: boolean}>}
-   */
   async storeOriginal(tempFilePath, evidenceId, originalFilename, mimeType) {
-    // Verificar que el archivo temporal existe
     if (!fs.existsSync(tempFilePath)) {
       throw new Error(`Archivo temporal no encontrado: ${tempFilePath}`);
     }
 
-    // Crear stream de lectura del archivo temporal
-    const readStream = fs.createReadStream(tempFilePath, { highWaterMark: CHUNK_SIZE });
+    const readStream = fs.createReadStream(tempFilePath, { highWaterMark: 64 * 1024 * 1024 });
 
     try {
-      // Guardar usando el metodo de streaming
       const result = await this.saveFileStream(
         readStream,
         STORAGE_STRUCTURE.ORIGINAL,
@@ -254,7 +288,7 @@ class StorageService {
         true // Cifrar por defecto
       );
 
-      // Eliminar archivo temporal despues de guardarlo
+      // Eliminar archivo temporal local
       await fs.promises.unlink(tempFilePath);
 
       return {
@@ -264,7 +298,6 @@ class StorageService {
         isEncrypted: result.isEncrypted
       };
     } catch (error) {
-      // En caso de error, intentar limpiar archivo temporal
       try {
         if (fs.existsSync(tempFilePath)) {
           await fs.promises.unlink(tempFilePath);
@@ -280,25 +313,15 @@ class StorageService {
   // CREAR COPIA BIT-A-BIT
   // ==========================================================================
 
-  /**
-   * Crea una copia bit-a-bit (byte-for-byte) de un archivo
-   * @param {string} sourceStorageKey - Clave del archivo fuente
-   * @param {number} evidenceId - ID de la evidencia
-   * @param {string} originalFilename - Nombre original
-   * @param {boolean} sourceEncrypted - Si el fuente esta cifrado
-   * @returns {Promise<{storageKey: string, hash: string}>}
-   */
   async createBitcopy(sourceStorageKey, evidenceId, originalFilename, sourceEncrypted = true) {
-    // Obtener stream del archivo fuente (descifrado si es necesario)
     const sourceStream = await this.getFileStream(sourceStorageKey, sourceEncrypted);
 
-    // Guardar como bitcopy (cifrado)
     const result = await this.saveFileStream(
       sourceStream,
       STORAGE_STRUCTURE.BITCOPY,
       evidenceId,
       originalFilename,
-      true // Siempre cifrar bitcopy
+      true
     );
 
     return {
@@ -312,12 +335,6 @@ class StorageService {
   // CALCULAR HASH SHA-256
   // ==========================================================================
 
-  /**
-   * Calcula hash SHA-256 de un archivo usando streaming
-   * @param {string} storageKey - Clave de almacenamiento
-   * @param {boolean} encrypted - Si el archivo esta cifrado
-   * @returns {Promise<string>} Hash hexadecimal
-   */
   async calculateHash(storageKey, encrypted = true) {
     const stream = await this.getFileStream(storageKey, encrypted);
     const hash = crypto.createHash('sha256');
@@ -333,13 +350,6 @@ class StorageService {
   // VERIFICAR INTEGRIDAD
   // ==========================================================================
 
-  /**
-   * Verifica la integridad de un archivo comparando su hash
-   * @param {string} storageKey - Clave de almacenamiento
-   * @param {string} expectedHash - Hash esperado
-   * @param {boolean} encrypted - Si el archivo esta cifrado
-   * @returns {Promise<boolean>}
-   */
   async verifyIntegrity(storageKey, expectedHash, encrypted = true) {
     try {
       const currentHash = await this.calculateHash(storageKey, encrypted);
@@ -354,25 +364,19 @@ class StorageService {
   // ELIMINAR ARCHIVO
   // ==========================================================================
 
-  /**
-   * Elimina un archivo y su metadata de cifrado si existe
-   * @param {string} storageKey - Clave de almacenamiento
-   */
   async deleteFile(storageKey) {
-    const basePath = getFullPath(storageKey);
-    const encryptedPath = `${basePath}.enc`;
-    const metadataPath = `${basePath}.meta`;
+    const keysToDelete = [storageKey, `${storageKey}.enc`, `${storageKey}.meta`];
 
-    // Intentar eliminar todos los archivos relacionados
-    const filesToDelete = [basePath, encryptedPath, metadataPath];
-
-    for (const filePath of filesToDelete) {
+    for (const key of keysToDelete) {
       try {
-        if (fs.existsSync(filePath)) {
-          await fs.promises.unlink(filePath);
+        if (await this.exists(key)) {
+          await s3.send(new DeleteObjectCommand({
+            Bucket: this.bucket,
+            Key: key
+          }));
         }
       } catch (error) {
-        console.error(`Error eliminando ${filePath}:`, error);
+        console.error(`Error eliminando ${key}:`, error);
       }
     }
   }
@@ -381,36 +385,36 @@ class StorageService {
   // OBTENER INFORMACION DE ARCHIVO
   // ==========================================================================
 
-  /**
-   * Obtiene informacion de un archivo almacenado
-   * @param {string} storageKey - Clave de almacenamiento
-   * @returns {Promise<{exists: boolean, sizeBytes?: number, encrypted?: boolean}>}
-   */
   async getFileInfo(storageKey) {
-    const basePath = getFullPath(storageKey);
-    const encryptedPath = `${basePath}.enc`;
-
     // Verificar si existe cifrado
-    if (fs.existsSync(encryptedPath)) {
-      const stats = await fs.promises.stat(encryptedPath);
+    const encryptedKey = `${storageKey}.enc`;
+    try {
+      const head = await s3.send(new HeadObjectCommand({
+        Bucket: this.bucket,
+        Key: encryptedKey
+      }));
       return {
         exists: true,
-        sizeBytes: stats.size,
+        sizeBytes: head.ContentLength,
         encrypted: true
       };
+    } catch (err) {
+      // No existe cifrado, verificar sin cifrar
     }
 
-    // Verificar si existe sin cifrar
-    if (fs.existsSync(basePath)) {
-      const stats = await fs.promises.stat(basePath);
+    try {
+      const head = await s3.send(new HeadObjectCommand({
+        Bucket: this.bucket,
+        Key: storageKey
+      }));
       return {
         exists: true,
-        sizeBytes: stats.size,
+        sizeBytes: head.ContentLength,
         encrypted: false
       };
+    } catch (err) {
+      return { exists: false };
     }
-
-    return { exists: false };
   }
 }
 

@@ -463,7 +463,7 @@ const downloadExport = async (req, res) => {
     }
 
     // Obtener stream
-    const stream = exportService.getDownloadStream(exportRecord.exportFile.storageKey);
+    const stream = await exportService.getDownloadStream(exportRecord.exportFile.storageKey);
 
     // NOTA: No actualizamos el status porque DOWNLOADED no existe en el enum
     // La descarga queda registrada en el audit log

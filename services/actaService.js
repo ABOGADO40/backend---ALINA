@@ -3,13 +3,12 @@
 // Sistema PRUEBA DIGITAL
 // ============================================================================
 
-const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { PrismaClient } = require('@prisma/client');
 const storageService = require('./storageService');
-const { STORAGE_STRUCTURE, generateStorageKey, getFullPath } = require('../config/storage');
+const { STORAGE_STRUCTURE, generateStorageKey } = require('../config/storage');
 
 const prisma = new PrismaClient();
 
@@ -243,10 +242,8 @@ class ActaService {
 
     const pdfFilename = `acta_${actaNumero.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.CERTIFICATES, evidenceId, pdfFilename);
-    const fullPath = getFullPath(storageKey);
 
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, pdfBytes);
+    await storageService.putBuffer(storageKey, pdfBytes, 'application/pdf');
 
     const actaResult = await prisma.$queryRaw`
       INSERT INTO generated_actas (
@@ -332,13 +329,12 @@ class ActaService {
       throw new Error('Archivo PDF no disponible');
     }
 
-    const fullPath = getFullPath(acta.pdf_storage_key);
-
-    if (!fs.existsSync(fullPath)) {
+    const fileExists = await storageService.exists(acta.pdf_storage_key);
+    if (!fileExists) {
       throw new Error('Archivo PDF no encontrado en storage');
     }
 
-    const stream = fs.createReadStream(fullPath);
+    const stream = await storageService.getS3Stream(acta.pdf_storage_key);
     const filename = `${acta.acta_numero}.pdf`;
 
     return {
@@ -640,10 +636,8 @@ class ActaService {
     // 8. Guardar PDF en storage
     const pdfFilename = `certificado_${certNumero.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.CERTIFICATES, evidenceId, pdfFilename);
-    const fullPath = getFullPath(storageKey);
 
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, pdfBytes);
+    await storageService.putBuffer(storageKey, pdfBytes, 'application/pdf');
 
     return {
       certNumero,
@@ -695,10 +689,8 @@ class ActaService {
 
     const pdfFilename = `cadena_custodia_${reporteNumero.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.CERTIFICATES, evidenceId, pdfFilename);
-    const fullPath = getFullPath(storageKey);
 
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, pdfBytes);
+    await storageService.putBuffer(storageKey, pdfBytes, 'application/pdf');
 
     return {
       reporteNumero,
@@ -762,10 +754,8 @@ class ActaService {
 
     const pdfFilename = `metadatos_${reporteNumero.replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
     const storageKey = generateStorageKey(STORAGE_STRUCTURE.CERTIFICATES, evidenceId, pdfFilename);
-    const fullPath = getFullPath(storageKey);
 
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, pdfBytes);
+    await storageService.putBuffer(storageKey, pdfBytes, 'application/pdf');
 
     return {
       reporteNumero,
