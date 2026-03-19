@@ -9,6 +9,7 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { prisma } = require('../config/db');
 const { createAuditLog } = require('../services/auditService');
 const storageService = require('../services/storageService');
+const { getMimeCategory } = require('../config/storage');
 const pipelineService = require('../services/pipelineService');
 const custodyService = require('../services/custodyService');
 const actaService = require('../services/actaService');
@@ -1570,7 +1571,7 @@ const importFromDrive = async (req, res) => {
               caseId: parsedCaseId,
               title: evidenceTitle,
               description: description || null,
-              sourceType: 'GOOGLE_DRIVE',
+              sourceType: getMimeCategory(googleMeta.mimeType) || 'OTHER',
               status: 'RECEIVED',
               isPublic: true,
               userIdRegistration: req.user.id
