@@ -23,7 +23,10 @@ const MIGRATIONS = [
   '20260124000000_custody_forensic_upgrade',
   '20260124010000_add_crypto_seal_event_type',
   '20260125000000_normalize_actor_display_name',
-  '20260127000000_add_contributor_actas'
+  '20260127000000_add_contributor_actas',
+  '20260319000000_add_upload_google_drive_event_type',
+  '20260324000000_add_contact_fields_to_evidence',
+  '20260325000000_add_missing_custody_event_types'
 ];
 
 // Valores de enum que existen en schema.prisma pero no en las migraciones

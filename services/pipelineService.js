@@ -653,12 +653,12 @@ class PipelineService {
 
     const stages = ['SCAN', 'HASH', 'BITCOPY', 'SEAL', 'ANALYSIS', 'PREPARATION'];
     const stageEventMap = {
-      'SCAN': ['SCAN_OK', 'SCAN_FAILED'],
-      'HASH': ['HASH_COMPUTED'],
+      'SCAN': ['SCAN', 'SCAN_OK', 'SCAN_FAILED'],
+      'HASH': ['HASH_CALCULATED', 'HASH_COMPUTED'],
       'BITCOPY': ['BITCOPY_CREATED'],
-      'SEAL': ['SEAL_CREATED'],
-      'ANALYSIS': ['RISK_REPORT_CREATED'],
-      'PREPARATION': ['CRYPTO_SEAL_CREATED', 'READY_FOR_EXPORT']
+      'SEAL': ['SEALED_DOC_CREATED', 'SEAL_CREATED'],
+      'ANALYSIS': ['METADATA_EXTRACTED', 'RISK_REPORT_CREATED', 'METADATA_CREATED'],
+      'PREPARATION': ['CRYPTO_SEAL_CREATED', 'READY_EXPORT', 'READY_FOR_EXPORT']
     };
 
     const pipeline = {};
