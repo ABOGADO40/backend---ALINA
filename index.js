@@ -66,6 +66,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : 'localhost');
 
+// Confiar en el proxy de Railway (necesario para express-rate-limit y req.ip)
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
+
 // ============================================================================
 // MIDDLEWARES GLOBALES
 // ============================================================================

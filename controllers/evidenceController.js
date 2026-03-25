@@ -1080,8 +1080,48 @@ const exportMetadata = async (req, res) => {
     const metadata = metadataReport.reportJson;
     const originalFile = evidence.files[0] || null;
 
+    // Aplanar propiedades de technical/device/fileInfo al nivel raiz para el reporte
+    const flatMetadata = { ...metadata };
+    if (metadata.technical) {
+      const techMappings = {
+        format: 'format', width: 'width', height: 'height',
+        fechaCaptura: 'creationDate', software: 'software',
+        espacioColor: 'colorSpace', zonaHoraria: 'timezone',
+        density: 'density', pageCount: 'pageCount',
+        title: 'title', author: 'author', creator: 'creator',
+        producer: 'producer', subject: 'subject', keywords: 'keywords',
+        creationDate: 'creationDate', modificationDate: 'modificationDate',
+        pdfVersion: 'pdfVersion', duracion: 'duracion', codec: 'codec',
+        sampleRate: 'sampleRate', canales: 'canales',
+        gps: 'gps'
+      };
+      for (const [techKey, flatKey] of Object.entries(techMappings)) {
+        const val = metadata.technical[techKey];
+        if (val !== undefined && val !== null && val !== 'N/A' && val !== 'No proporcionada') {
+          if (flatMetadata[flatKey] === undefined) {
+            flatMetadata[flatKey] = val;
+          }
+        }
+      }
+    }
+    if (metadata.device) {
+      for (const [key, val] of Object.entries(metadata.device)) {
+        if (val && val !== 'No proporcionada') {
+          flatMetadata[`device_${key}`] = val;
+        }
+      }
+    }
+    if (metadata.fileInfo) {
+      if (metadata.fileInfo.mimeType && !flatMetadata.mimeType) {
+        flatMetadata.mimeType = metadata.fileInfo.mimeType;
+      }
+      if (metadata.fileInfo.sizeBytes && !flatMetadata.fileSize) {
+        flatMetadata.fileSize = metadata.fileInfo.sizeBytes;
+      }
+    }
+
     // Generar PDF
-    const pdfBytes = await generateMetadataPdf(metadata, metadataReport.version, evidence, originalFile);
+    const pdfBytes = await generateMetadataPdf(flatMetadata, metadataReport.version, evidence, originalFile);
 
     // Registrar auditoria
     await createAuditLog(
@@ -1319,8 +1359,15 @@ async function generateMetadataPdf(metadata, version, evidence, originalFile) {
   });
   y -= 25;
 
-  // Propiedades principales
-  const mainProps = ['title', 'author', 'creator', 'producer', 'subject', 'keywords', 'creationDate', 'modificationDate', 'pageCount', 'format', 'width', 'height', 'mimeType', 'fileSize'];
+  // Propiedades principales (cubre PDF, imagen, video, audio)
+  const mainProps = [
+    'title', 'author', 'creator', 'producer', 'subject', 'keywords',
+    'creationDate', 'modificationDate', 'pageCount',
+    'format', 'width', 'height', 'mimeType', 'fileSize',
+    'software', 'colorSpace', 'timezone', 'density', 'pdfVersion',
+    'duracion', 'codec', 'sampleRate', 'canales',
+    'device_fabricante', 'device_modelo', 'device_numeroSerie', 'device_lente'
+  ];
   const propLabels = {
     title: 'Titulo',
     author: 'Autor',
@@ -1332,10 +1379,23 @@ async function generateMetadataPdf(metadata, version, evidence, originalFile) {
     modificationDate: 'Fecha de modificacion',
     pageCount: 'Numero de paginas',
     format: 'Formato',
-    width: 'Ancho',
-    height: 'Alto',
+    width: 'Ancho (px)',
+    height: 'Alto (px)',
     mimeType: 'Tipo MIME',
-    fileSize: 'Tamano de archivo'
+    fileSize: 'Tamano de archivo',
+    software: 'Software',
+    colorSpace: 'Espacio de color',
+    timezone: 'Zona horaria',
+    density: 'Densidad (DPI)',
+    pdfVersion: 'Version PDF',
+    duracion: 'Duracion',
+    codec: 'Codec',
+    sampleRate: 'Frecuencia de muestreo',
+    canales: 'Canales',
+    device_fabricante: 'Fabricante',
+    device_modelo: 'Modelo',
+    device_numeroSerie: 'Numero de serie',
+    device_lente: 'Lente'
   };
 
   let foundMainProps = false;

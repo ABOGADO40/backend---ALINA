@@ -65,16 +65,14 @@ class RiskAnalysisService {
     const rules = [];
     const tech = metadata.technical || {};
 
-    // EXIF_INCONSISTENCY
-    if (tech.exif) {
-      if (!tech.exif.present) {
-        rules.push({
-          code: 'EXIF_MISSING',
-          severity: 'LOW',
-          description: 'No se encontro informacion EXIF en la imagen',
-          variables: ['exif.present']
-        });
-      }
+    // EXIF_MISSING - verificar si tiene datos EXIF (fecha de captura como proxy)
+    if (!tech.fechaCaptura && !tech.software) {
+      rules.push({
+        code: 'EXIF_MISSING',
+        severity: 'LOW',
+        description: 'No se encontro informacion EXIF en la imagen (fecha de captura y software ausentes)',
+        variables: ['fechaCaptura', 'software']
+      });
     }
 
     // EDIT_SOFTWARE_DETECTED
@@ -109,7 +107,7 @@ class RiskAnalysisService {
     // EXTENSION_HEADER_MISMATCH
     if (metadata.fileInfo) {
       const mimeFormat = metadata.fileInfo.mimeType?.split('/')[1];
-      if (mimeFormat && tech.format && mimeFormat !== tech.format) {
+      if (mimeFormat && tech.format && mimeFormat.toLowerCase() !== tech.format.toLowerCase()) {
         rules.push({
           code: 'EXTENSION_HEADER_MISMATCH',
           severity: 'HIGH',

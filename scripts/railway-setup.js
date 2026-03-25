@@ -26,7 +26,8 @@ const MIGRATIONS = [
   '20260127000000_add_contributor_actas',
   '20260319000000_add_upload_google_drive_event_type',
   '20260324000000_add_contact_fields_to_evidence',
-  '20260325000000_add_missing_custody_event_types'
+  '20260325000000_add_missing_custody_event_types',
+  '20260325010000_add_remaining_missing_enum_values'
 ];
 
 // Valores de enum que existen en schema.prisma pero no en las migraciones

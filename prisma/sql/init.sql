@@ -43,9 +43,11 @@ CREATE TYPE "enum_file_role" AS ENUM (
     'SEALED',
     'CERT_PDF',
     'CERT_JSON',
+    'CERT_TXT',
     'METADATA_REPORT',
     'RISK_REPORT',
-    'EXPORT_ZIP'
+    'EXPORT_ZIP',
+    'EVENTLOG'
 );
 
 -- Algoritmo de hash
@@ -88,7 +90,7 @@ CREATE TYPE "enum_custody_event_type" AS ENUM (
 CREATE TYPE "enum_export_scope" AS ENUM ('SINGLE_EVIDENCE', 'CASE', 'MULTIPLE_EVIDENCE');
 
 -- Estado de exportacion
-CREATE TYPE "enum_export_status" AS ENUM ('CREATING', 'READY', 'ERROR');
+CREATE TYPE "enum_export_status" AS ENUM ('CREATING', 'READY', 'ERROR', 'DOWNLOADED');
 
 -- ============================================================================
 -- TBL-01: users - Usuarios del sistema

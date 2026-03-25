@@ -3,8 +3,6 @@
 // Sistema PRUEBA DIGITAL
 // ============================================================================
 
-const fs = require('fs');
-const path = require('path');
 const { prisma } = require('../config/db');
 const storageService = require('./storageService');
 
@@ -149,7 +147,7 @@ class MetadataService {
         technical: {
           width: metadata.width,
           height: metadata.height,
-          format: metadata.format?.toUpperCase() || 'N/A',
+          format: metadata.format?.toLowerCase() || 'N/A',
           space: metadata.space || 'N/A',
           channels: metadata.channels,
           depth: metadata.depth ? `${metadata.depth} bits` : 'N/A',
@@ -160,45 +158,54 @@ class MetadataService {
         device: {}
       };
 
-      // Intentar extraer EXIF avanzado para JPEG/TIFF
-      if (metadata.exif && (mimeType === 'image/jpeg' || mimeType === 'image/tiff')) {
-        try {
-          const exifData = this._parseExifAdvanced(imageBuffer);
-          if (exifData) {
-            // Agregar datos tecnicos de EXIF
-            if (exifData.timezone) {
-              result.technical.zonaHoraria = exifData.timezone;
-            }
-            if (exifData.dateTimeOriginal) {
-              result.technical.fechaCaptura = exifData.dateTimeOriginal;
-            }
-            if (exifData.software) {
-              result.technical.software = exifData.software;
-            }
-            if (exifData.colorSpace) {
-              result.technical.espacioColor = exifData.colorSpace;
-            }
+      // Extraer EXIF con exifr (soporta JPEG, TIFF, HEIC, etc.)
+      try {
+        const exifr = require('exifr');
+        const exifData = await exifr.parse(imageBuffer, {
+          tiff: true,
+          ifd0: true,
+          exif: true,
+          gps: true,
+          interop: true,
+          translateValues: true,
+          reviveValues: false
+        });
 
-            // Agregar datos del dispositivo
-            if (exifData.make) {
-              result.device.fabricante = exifData.make;
-            }
-            if (exifData.model) {
-              result.device.modelo = exifData.model;
-            }
-            if (exifData.serialNumber) {
-              result.device.numeroSerie = exifData.serialNumber;
-            }
-            if (exifData.lensModel) {
-              result.device.lente = exifData.lensModel;
-            }
-
-            // Red/Proveedor (no disponible en EXIF standard)
-            result.device.redProveedor = 'No proporcionada';
+        if (exifData) {
+          if (exifData.DateTimeOriginal) {
+            result.technical.fechaCaptura = String(exifData.DateTimeOriginal);
           }
-        } catch (exifError) {
-          console.warn('[MetadataService] Error extrayendo EXIF avanzado:', exifError.message);
+          if (exifData.OffsetTimeOriginal || exifData.OffsetTime) {
+            result.technical.zonaHoraria = exifData.OffsetTimeOriginal || exifData.OffsetTime;
+          }
+          if (exifData.Software) {
+            result.technical.software = String(exifData.Software);
+          }
+          if (exifData.ColorSpace) {
+            result.technical.espacioColor = exifData.ColorSpace === 1 ? 'sRGB' : String(exifData.ColorSpace);
+          }
+          if (exifData.Make) {
+            result.device.fabricante = String(exifData.Make).trim();
+          }
+          if (exifData.Model) {
+            result.device.modelo = String(exifData.Model).trim();
+          }
+          if (exifData.SerialNumber || exifData.BodySerialNumber) {
+            result.device.numeroSerie = String(exifData.SerialNumber || exifData.BodySerialNumber);
+          }
+          if (exifData.LensModel) {
+            result.device.lente = String(exifData.LensModel);
+          }
+          if (exifData.latitude !== undefined && exifData.longitude !== undefined) {
+            result.technical.gps = {
+              latitud: exifData.latitude,
+              longitud: exifData.longitude,
+              altitud: exifData.GPSAltitude || null
+            };
+          }
         }
+      } catch (exifError) {
+        console.warn('[MetadataService] Error extrayendo EXIF con exifr:', exifError.message);
       }
 
       // Si no hay datos de dispositivo, poner valores por defecto
@@ -234,131 +241,6 @@ class MetadataService {
           redProveedor: 'No proporcionada'
         }
       };
-    }
-  }
-
-  // ==========================================================================
-  // PARSEAR EXIF AVANZADO (USANDO BUFFER DIRECTO)
-  // ==========================================================================
-
-  _parseExifAdvanced(imageBuffer) {
-    try {
-      // Buscar el segmento APP1 (EXIF) en JPEG
-      let offset = 2; // Skip SOI marker
-      const exifData = {};
-
-      while (offset < imageBuffer.length - 4) {
-        // Verificar que es un marcador
-        if (imageBuffer[offset] !== 0xFF) break;
-
-        const marker = imageBuffer[offset + 1];
-        const segmentLength = imageBuffer.readUInt16BE(offset + 2);
-
-        // APP1 marker (EXIF)
-        if (marker === 0xE1) {
-          const exifHeader = imageBuffer.slice(offset + 4, offset + 10).toString('ascii');
-          if (exifHeader.startsWith('Exif')) {
-            // Parsear TIFF header dentro del EXIF
-            const tiffStart = offset + 10;
-            const tiffBuffer = imageBuffer.slice(tiffStart, offset + 2 + segmentLength);
-
-            this._parseTiffIfd(tiffBuffer, exifData);
-          }
-        }
-
-        offset += 2 + segmentLength;
-      }
-
-      return Object.keys(exifData).length > 0 ? exifData : null;
-    } catch (error) {
-      console.warn('[MetadataService] Error en parseExifAdvanced:', error.message);
-      return null;
-    }
-  }
-
-  _parseTiffIfd(buffer, exifData) {
-    try {
-      // Determinar endianness
-      const byteOrder = buffer.slice(0, 2).toString('ascii');
-      const isLittleEndian = byteOrder === 'II';
-
-      const readUInt16 = (buf, off) => isLittleEndian ? buf.readUInt16LE(off) : buf.readUInt16BE(off);
-      const readUInt32 = (buf, off) => isLittleEndian ? buf.readUInt32LE(off) : buf.readUInt32BE(off);
-
-      // Verificar magic number
-      const magic = readUInt16(buffer, 2);
-      if (magic !== 42) return;
-
-      // Obtener offset del primer IFD
-      const ifdOffset = readUInt32(buffer, 4);
-
-      this._readIfdEntries(buffer, ifdOffset, exifData, readUInt16, readUInt32, isLittleEndian);
-    } catch (error) {
-      // Silenciar errores de parsing
-    }
-  }
-
-  _readIfdEntries(buffer, ifdOffset, exifData, readUInt16, readUInt32, isLittleEndian) {
-    try {
-      if (ifdOffset >= buffer.length - 2) return;
-
-      const numEntries = readUInt16(buffer, ifdOffset);
-
-      for (let i = 0; i < numEntries; i++) {
-        const entryOffset = ifdOffset + 2 + (i * 12);
-        if (entryOffset + 12 > buffer.length) break;
-
-        const tag = readUInt16(buffer, entryOffset);
-        const type = readUInt16(buffer, entryOffset + 2);
-        const count = readUInt32(buffer, entryOffset + 4);
-        const valueOffset = readUInt32(buffer, entryOffset + 8);
-
-        // Extraer valores de tags conocidos
-        switch (tag) {
-          case 0x010F: // Make
-            exifData.make = this._readExifString(buffer, valueOffset, count);
-            break;
-          case 0x0110: // Model
-            exifData.model = this._readExifString(buffer, valueOffset, count);
-            break;
-          case 0x0131: // Software
-            exifData.software = this._readExifString(buffer, valueOffset, count);
-            break;
-          case 0x9003: // DateTimeOriginal
-            exifData.dateTimeOriginal = this._readExifString(buffer, valueOffset, count);
-            break;
-          case 0xA431: // Serial Number
-            exifData.serialNumber = this._readExifString(buffer, valueOffset, count);
-            break;
-          case 0xA434: // Lens Model
-            exifData.lensModel = this._readExifString(buffer, valueOffset, count);
-            break;
-          case 0x8769: // EXIF IFD pointer
-            this._readIfdEntries(buffer, valueOffset, exifData, readUInt16, readUInt32, isLittleEndian);
-            break;
-        }
-      }
-
-      // Intentar extraer timezone del DateTimeOriginal
-      if (exifData.dateTimeOriginal) {
-        // Buscar offset de timezone en tag 0x9010 o 0x9011
-        // Por ahora asumimos que no esta disponible si no se encuentra explicitamente
-        if (!exifData.timezone) {
-          exifData.timezone = 'No proporcionada';
-        }
-      }
-    } catch (error) {
-      // Silenciar errores de parsing
-    }
-  }
-
-  _readExifString(buffer, offset, count) {
-    try {
-      if (offset + count > buffer.length) return null;
-      const str = buffer.slice(offset, offset + count).toString('ascii');
-      return str.replace(/\0+$/, '').trim();
-    } catch {
-      return null;
     }
   }
 
@@ -769,22 +651,6 @@ class MetadataService {
     });
   }
 
-  // ==========================================================================
-  // UTILIDADES PRIVADAS (LEGACY - mantener por compatibilidad)
-  // ==========================================================================
-
-  _parseExifBasic(exifBuffer) {
-    // Parseo basico de EXIF (legacy)
-    try {
-      return {
-        present: true,
-        size: exifBuffer.length,
-        note: 'EXIF data presente'
-      };
-    } catch {
-      return { present: false };
-    }
-  }
 }
 
 // ============================================================================

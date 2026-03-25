@@ -1315,28 +1315,78 @@ Fecha de generacion: ${new Date().toISOString()}
       return `${spaces}${value}`;
     };
 
-    // Propiedades principales
-    const mainProps = ['title', 'author', 'creator', 'producer', 'subject', 'keywords', 'creationDate', 'modificationDate', 'pageCount', 'format', 'width', 'height', 'mimeType'];
+    // Aplanar propiedades de technical/device/fileInfo al nivel raiz
+    const flat = { ...metadata };
+    if (metadata.technical) {
+      const techMappings = {
+        format: 'format', width: 'width', height: 'height',
+        fechaCaptura: 'creationDate', software: 'software',
+        espacioColor: 'colorSpace', zonaHoraria: 'timezone',
+        density: 'density', pageCount: 'pageCount',
+        title: 'title', author: 'author', creator: 'creator',
+        producer: 'producer', subject: 'subject', keywords: 'keywords',
+        creationDate: 'creationDate', modificationDate: 'modificationDate',
+        pdfVersion: 'pdfVersion', duracion: 'duracion', codec: 'codec',
+        sampleRate: 'sampleRate', canales: 'canales'
+      };
+      for (const [techKey, flatKey] of Object.entries(techMappings)) {
+        const val = metadata.technical[techKey];
+        if (val !== undefined && val !== null && val !== 'N/A' && val !== 'No proporcionada') {
+          if (flat[flatKey] === undefined) flat[flatKey] = val;
+        }
+      }
+    }
+    if (metadata.device) {
+      for (const [key, val] of Object.entries(metadata.device)) {
+        if (val && val !== 'No proporcionada') flat[`device_${key}`] = val;
+      }
+    }
+    if (metadata.fileInfo) {
+      if (metadata.fileInfo.mimeType && !flat.mimeType) flat.mimeType = metadata.fileInfo.mimeType;
+      if (metadata.fileInfo.sizeBytes && !flat.fileSize) flat.fileSize = metadata.fileInfo.sizeBytes;
+    }
+
+    // Propiedades principales (cubre PDF, imagen, video, audio)
+    const mainProps = [
+      'title', 'author', 'creator', 'producer', 'subject', 'keywords',
+      'creationDate', 'modificationDate', 'pageCount',
+      'format', 'width', 'height', 'mimeType', 'fileSize',
+      'software', 'colorSpace', 'timezone', 'density', 'pdfVersion',
+      'duracion', 'codec', 'sampleRate', 'canales',
+      'device_fabricante', 'device_modelo', 'device_numeroSerie', 'device_lente'
+    ];
+    const propLabels = {
+      title: 'Titulo', author: 'Autor', creator: 'Creador', producer: 'Productor',
+      subject: 'Asunto', keywords: 'Palabras clave', creationDate: 'Fecha de creacion',
+      modificationDate: 'Fecha de modificacion', pageCount: 'Numero de paginas',
+      format: 'Formato', width: 'Ancho (px)', height: 'Alto (px)', mimeType: 'Tipo MIME',
+      fileSize: 'Tamano de archivo', software: 'Software', colorSpace: 'Espacio de color',
+      timezone: 'Zona horaria', density: 'Densidad (DPI)', pdfVersion: 'Version PDF',
+      duracion: 'Duracion', codec: 'Codec', sampleRate: 'Frecuencia de muestreo',
+      canales: 'Canales', device_fabricante: 'Fabricante', device_modelo: 'Modelo',
+      device_numeroSerie: 'Numero de serie', device_lente: 'Lente'
+    };
 
     txt += `--------------------------------------------------------------------------------
                            PROPIEDADES PRINCIPALES
 --------------------------------------------------------------------------------\n\n`;
 
     for (const prop of mainProps) {
-      if (metadata[prop] !== undefined && metadata[prop] !== null) {
-        txt += `${prop.charAt(0).toUpperCase() + prop.slice(1).replace(/([A-Z])/g, ' $1')}: ${metadata[prop]}\n`;
+      if (flat[prop] !== undefined && flat[prop] !== null) {
+        const label = propLabels[prop] || prop.charAt(0).toUpperCase() + prop.slice(1).replace(/([A-Z])/g, ' $1');
+        txt += `${label}: ${typeof flat[prop] === 'object' ? JSON.stringify(flat[prop]) : flat[prop]}\n`;
       }
     }
 
     // Otras propiedades
-    const otherProps = Object.keys(metadata).filter(k => !mainProps.includes(k));
+    const otherProps = Object.keys(flat).filter(k => !mainProps.includes(k));
     if (otherProps.length > 0) {
       txt += `\n--------------------------------------------------------------------------------
                            PROPIEDADES ADICIONALES
 --------------------------------------------------------------------------------\n\n`;
 
       for (const prop of otherProps) {
-        const value = metadata[prop];
+        const value = flat[prop];
         if (typeof value === 'object' && value !== null) {
           txt += `${prop}:\n${formatValue(value, 1)}\n\n`;
         } else {
