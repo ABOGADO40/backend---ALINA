@@ -58,6 +58,7 @@ const exportRoutes = require('./routes/exportRoutes');
 const verificationRoutes = require('./routes/verificationRoutes');
 const auditRoutes = require('./routes/auditRoutes');
 const custodyRoutes = require('./routes/custodyRoutes');
+const legalRoutes = require('./routes/legalRoutes');
 
 // ============================================================================
 // CONFIGURACION
@@ -135,6 +136,7 @@ app.use('/api/exports', exportRoutes);
 app.use('/api/verify', verificationRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/custody', custodyRoutes);
+app.use('/api/legal', legalRoutes);
 
 // ============================================================================
 // MANEJO DE ERRORES GLOBAL

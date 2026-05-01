@@ -458,6 +458,34 @@ async function main() {
     });
     console.log('   - Campos de auditoria actualizados.\n');
 
+    // 8. Crear documentos legales (Privacidad y Terminos) con texto placeholder
+    console.log('8. Creando documentos legales (Privacidad y Terminos)...');
+
+    const legalDocuments = [
+      {
+        type: 'PRIVACY_POLICY',
+        content: 'POLITICA DE PRIVACIDAD - ALINA\n\nEsta es una version preliminar de la Politica de Privacidad de ALINA. El administrador del sistema debe actualizar este contenido desde la seccion de Configuracion.\n\nALINA, sistema de evidencia digital forense, se compromete a proteger la informacion personal de sus usuarios conforme a la Ley N.° 29733 de Proteccion de Datos Personales del Peru.\n\n1. Datos recolectados\n[Pendiente de redaccion por el administrador]\n\n2. Finalidad del tratamiento\n[Pendiente de redaccion por el administrador]\n\n3. Derechos del titular\n[Pendiente de redaccion por el administrador]\n\n4. Contacto\nPara cualquier consulta sobre esta politica, escribir a contacto@pruebadigital.com'
+      },
+      {
+        type: 'TERMS_AND_CONDITIONS',
+        content: 'TERMINOS Y CONDICIONES - ALINA\n\nEsta es una version preliminar de los Terminos y Condiciones de ALINA. El administrador del sistema debe actualizar este contenido desde la seccion de Configuracion.\n\nAl utilizar la plataforma ALINA, el usuario acepta los presentes Terminos y Condiciones.\n\n1. Objeto del servicio\n[Pendiente de redaccion por el administrador]\n\n2. Obligaciones del usuario\n[Pendiente de redaccion por el administrador]\n\n3. Limitacion de responsabilidad\n[Pendiente de redaccion por el administrador]\n\n4. Propiedad intelectual\n[Pendiente de redaccion por el administrador]\n\n5. Jurisdiccion\nEstos Terminos se rigen por las leyes de la Republica del Peru.'
+      }
+    ];
+
+    for (const doc of legalDocuments) {
+      await prisma.legalDocument.upsert({
+        where: { type: doc.type },
+        update: {},
+        create: {
+          type: doc.type,
+          content: doc.content,
+          userIdRegistration: admin.id
+        }
+      });
+      console.log(`   - Documento legal creado/preservado: ${doc.type}`);
+    }
+    console.log('   Documentos legales completados.\n');
+
     // Resumen final
     console.log('============================================');
     console.log('SEED COMPLETADO EXITOSAMENTE');

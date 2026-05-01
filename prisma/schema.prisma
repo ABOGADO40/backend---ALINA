@@ -533,3 +533,22 @@ enum enum_contributor_condition {
   TERCERO
   OTRO
 }
+
+enum LegalDocumentType {
+  PRIVACY_POLICY
+  TERMS_AND_CONDITIONS
+
+  @@map("enum_legal_document_type")
+}
+
+model LegalDocument {
+  id                   Int               @id @default(autoincrement())
+  type                 LegalDocumentType @unique
+  content              String            @db.Text
+  userIdRegistration   Int?              @map("user_id_registration")
+  dateTimeRegistration DateTime          @default(now()) @map("date_time_registration") @db.Timestamptz(6)
+  userIdModification   Int?              @map("user_id_modification")
+  dateTimeModification DateTime?         @map("date_time_modification") @db.Timestamptz(6)
+
+  @@map("legal_documents")
+}
