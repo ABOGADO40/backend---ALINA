@@ -449,6 +449,21 @@ const uploadEvidence = async (req, res) => {
       }
     });
 
+    // Fecha de modificacion del archivo segun el filesystem del cliente (enviada por el frontend)
+    // Es la unica fuente de verdad disponible: HTTP multipart NO transmite timestamps del FS original
+    let fileLastModifiedIso = null;
+    if (req.body.fileLastModifiedIso) {
+      const parsed = new Date(req.body.fileLastModifiedIso);
+      if (!Number.isNaN(parsed.getTime())) {
+        fileLastModifiedIso = parsed.toISOString();
+      }
+    } else if (req.body.fileLastModified) {
+      const ms = parseInt(req.body.fileLastModified, 10);
+      if (!Number.isNaN(ms)) {
+        fileLastModifiedIso = new Date(ms).toISOString();
+      }
+    }
+
     // Registrar evento de custodia inicial (Cambio 4: SHA-256 desde el primer evento)
     // Usar stored.sizeBytes que es el tamano real del archivo procesado
     await custodyService.registerUpload(
@@ -464,6 +479,7 @@ const uploadEvidence = async (req, res) => {
         storageObjectId: stored.storageKey,
         evidenceSha256: fileHash,
         sha256CalculatedAtUtc,
+        clientFileLastModifiedIso: fileLastModifiedIso,
         description: `Archivo original subido: ${file.originalname}`
       }
     );

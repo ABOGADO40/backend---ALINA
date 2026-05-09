@@ -403,6 +403,10 @@ class CustodyService {
       sha256CalculatedAtUtc: details.sha256CalculatedAtUtc || new Date().toISOString(),
       description: details.description || `Archivo original subido: ${details.originalFilename}`
     };
+    // Fecha de modificacion del archivo segun el filesystem del cliente (opcional)
+    if (details.clientFileLastModifiedIso) {
+      payload.clientFileLastModifiedIso = details.clientFileLastModifiedIso;
+    }
     return this.registerEvent(evidenceId, 'UPLOAD', 'USER', userId, payload);
   }
 

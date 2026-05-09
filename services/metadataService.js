@@ -49,6 +49,9 @@ class MetadataService {
           const imageData = await this._extractImageMetadata(storageKey, mimeType);
           Object.assign(metadata.technical, imageData.technical || {});
           Object.assign(metadata.device, imageData.device || {});
+          if (Array.isArray(imageData.warnings) && imageData.warnings.length > 0) {
+            metadata.warnings.push(...imageData.warnings);
+          }
           break;
         case 'VIDEO':
           const videoData = await this._extractVideoMetadata(storageKey);
@@ -131,6 +134,7 @@ class MetadataService {
   // ==========================================================================
 
   async _extractImageMetadata(storageKey, mimeType) {
+    const warnings = [];
     try {
       const sharp = require('sharp');
 
@@ -143,6 +147,17 @@ class MetadataService {
 
       const metadata = await sharp(imageBuffer).metadata();
 
+      // Sharp devuelve metadata.depth como string ('uchar', 'ushort', etc), no como numero
+      const depthBitsMap = {
+        uchar: 8, char: 8,
+        ushort: 16, short: 16,
+        uint: 32, int: 32,
+        float: 32, complex: 64,
+        double: 64, dpcomplex: 128
+      };
+      const depthBits = metadata.depth ? depthBitsMap[String(metadata.depth).toLowerCase()] : null;
+      const depthLabel = depthBits ? `${depthBits} bits` : (metadata.depth ? `${metadata.depth}` : 'N/A');
+
       const result = {
         technical: {
           width: metadata.width,
@@ -150,12 +165,13 @@ class MetadataService {
           format: metadata.format?.toLowerCase() || 'N/A',
           space: metadata.space || 'N/A',
           channels: metadata.channels,
-          depth: metadata.depth ? `${metadata.depth} bits` : 'N/A',
+          depth: depthLabel,
           density: metadata.density || null,
           hasAlpha: metadata.hasAlpha,
           orientation: metadata.orientation || 1
         },
-        device: {}
+        device: {},
+        warnings
       };
 
       // Extraer EXIF con exifr (soporta JPEG, TIFF, HEIC, etc.)
@@ -206,6 +222,7 @@ class MetadataService {
         }
       } catch (exifError) {
         console.warn('[MetadataService] Error extrayendo EXIF con exifr:', exifError.message);
+        warnings.push(`EXIF parse error: ${exifError.message}`);
       }
 
       // Si no hay datos de dispositivo, poner valores por defecto
@@ -239,7 +256,8 @@ class MetadataService {
           modelo: 'No proporcionada',
           numeroSerie: 'No proporcionada',
           redProveedor: 'No proporcionada'
-        }
+        },
+        warnings: [`Image metadata extraction failed: ${error.message}`]
       };
     }
   }

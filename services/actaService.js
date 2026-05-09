@@ -1522,6 +1522,28 @@ class ActaService {
     const technical = metadata?.technical || {};
     const device = metadata?.device || {};
     const fileInfo = metadata?.fileInfo || {};
+    const warnings = Array.isArray(metadata?.warnings) ? metadata.warnings : [];
+
+    // Parser para fechas EXIF en formato "YYYY:MM:DD HH:MM:SS"
+    const parseExifDateTime = (raw) => {
+      if (!raw) return null;
+      if (raw instanceof Date) return raw;
+      const str = String(raw).trim();
+      const match = str.match(/^(\d{4}):(\d{2}):(\d{2})[\sT](\d{2}):(\d{2}):(\d{2})/);
+      if (match) {
+        const [, y, mo, d, h, mi, s] = match;
+        const iso = `${y}-${mo}-${d}T${h}:${mi}:${s}`;
+        const dt = new Date(iso);
+        return Number.isNaN(dt.getTime()) ? null : dt;
+      }
+      const dt = new Date(str);
+      return Number.isNaN(dt.getTime()) ? null : dt;
+    };
+
+    const formatExifDateTime = (raw) => {
+      const dt = parseExifDateTime(raw);
+      return dt ? formatDateTime(dt) : null;
+    };
 
     // ===========================================
     // ENCABEZADO
@@ -1570,8 +1592,18 @@ class ActaService {
     const extension = originalFile?.originalFilename ? path.extname(originalFile.originalFilename) : 'N/A';
     drawTableRow('Extension', extension, { alternate: true });
 
-    drawTableRow('Encriptado', fileInfo.encrypted ? 'Si' : 'No', { alternate: false });
-    drawTableRow('Fecha subida', formatDateTime(evidence.createdAt), { alternate: true });
+    drawTableRow('Encriptado en almacen', fileInfo.encrypted ? 'Si (AES-256-GCM)' : 'No', { alternate: false });
+    drawTableRow('Fecha subida al sistema', formatDateTime(evidence.createdAt), { alternate: true });
+
+    // Fecha de modificacion segun el filesystem del cliente (cuando el frontend la envia)
+    if (fileInfo.clientFileLastModifiedIso) {
+      const fechaModFs = formatExifDateTime(fileInfo.clientFileLastModifiedIso);
+      drawTableRow('Fecha modif. archivo (cliente)', fechaModFs || 'No proporcionada', { alternate: false });
+    }
+    if (fileInfo.clientFileCreatedIso) {
+      const fechaCreFs = formatExifDateTime(fileInfo.clientFileCreatedIso);
+      drawTableRow('Fecha creacion archivo (cliente)', fechaCreFs || 'No proporcionada', { alternate: true });
+    }
     y -= 10;
 
     // ===========================================
@@ -1598,12 +1630,24 @@ class ActaService {
       drawSubSection('Metadatos de Imagen');
       drawTableRow('Dimensiones', technical.width && technical.height ? `${technical.width} x ${technical.height} px` : 'No proporcionada', { alternate: false });
       drawTableRow('Formato', technical.format, { alternate: true });
-      drawTableRow('Espacio de color', technical.space, { alternate: false });
+      drawTableRow('Espacio de color', technical.espacioColor || technical.space, { alternate: false });
       drawTableRow('Profundidad bits', technical.depth, { alternate: true });
       drawTableRow('Densidad (DPI)', technical.density ? String(technical.density) : 'No proporcionada', { alternate: false });
+      const fechaCapturaFmt = technical.fechaCaptura ? (formatExifDateTime(technical.fechaCaptura) || String(technical.fechaCaptura)) : null;
+      drawTableRow('Fecha captura (EXIF)', fechaCapturaFmt || 'No proporcionada', { alternate: true });
+      drawTableRow('Software / Programa', technical.software || 'No proporcionada', { alternate: false });
       drawTableRow('Zona horaria', technical.zonaHoraria || 'No proporcionada', { alternate: true });
-      drawTableRow('Modelo dispositivo', device.modelo || 'No proporcionada', { alternate: false });
-      drawTableRow('Numero serie', device.numeroSerie || 'No proporcionada', { alternate: true });
+      // Coordenadas GPS si se extrajeron del EXIF
+      let gpsStr = 'No proporcionada';
+      if (technical.gps && (technical.gps.latitud !== undefined || technical.gps.longitud !== undefined)) {
+        const lat = technical.gps.latitud;
+        const lon = technical.gps.longitud;
+        const alt = technical.gps.altitud;
+        gpsStr = `Lat: ${lat ?? 'N/A'}, Lon: ${lon ?? 'N/A'}${alt !== null && alt !== undefined ? `, Alt: ${alt}m` : ''}`;
+      }
+      drawTableRow('GPS', gpsStr, { alternate: false });
+      drawTableRow('Modelo dispositivo', device.modelo || 'No proporcionada', { alternate: true });
+      drawTableRow('Numero serie', device.numeroSerie || 'No proporcionada', { alternate: false });
     }
     else if (sourceType === 'VIDEO') {
       // Metadatos de Video
@@ -1656,7 +1700,8 @@ class ActaService {
       drawTableRow('Fabricante', device.fabricante || 'No proporcionada', { alternate: false });
       drawTableRow('Modelo', device.modelo || 'No proporcionada', { alternate: true });
       drawTableRow('Numero serie/ID', device.numeroSerie || 'No proporcionada', { alternate: false });
-      drawTableRow('Red / Proveedor', device.redProveedor || 'No proporcionada', { alternate: true });
+      drawTableRow('Lente', device.lente || 'No proporcionada', { alternate: true });
+      drawTableRow('Red / Proveedor', device.redProveedor || 'No proporcionada', { alternate: false });
       y -= 10;
     }
 
@@ -1686,9 +1731,29 @@ class ActaService {
     y -= 10;
 
     // ===========================================
-    // SECCION 7: NOTA LEGAL
+    // SECCION OPCIONAL: ADVERTENCIAS TECNICAS
     // ===========================================
-    const notaSectionNumber = (sourceType === 'IMAGE' || sourceType === 'VIDEO') ? '7' : '6';
+    if (warnings.length > 0) {
+      checkPage(60);
+      const warningsSectionNumber = (sourceType === 'IMAGE' || sourceType === 'VIDEO') ? '7' : '6';
+      drawSection('ADVERTENCIAS TECNICAS DE EXTRACCION', warningsSectionNumber);
+      for (const warn of warnings) {
+        checkPage(20);
+        page.drawText(`- ${sanitize(String(warn))}`, { x: marginLeft + 10, y, font: helvetica, size: 9, color: COLORS.darkGray });
+        y -= 14;
+      }
+      y -= 10;
+    }
+
+    // ===========================================
+    // SECCION FINAL: NOTA LEGAL
+    // ===========================================
+    let notaSectionNumber;
+    if (sourceType === 'IMAGE' || sourceType === 'VIDEO') {
+      notaSectionNumber = warnings.length > 0 ? '8' : '7';
+    } else {
+      notaSectionNumber = warnings.length > 0 ? '7' : '6';
+    }
     checkPage(120);
     drawSection('NOTA LEGAL', notaSectionNumber);
 

@@ -411,6 +411,28 @@ class PipelineService {
           context.evidence.sourceType
         );
 
+        // Recuperar fecha de modificacion del archivo segun filesystem del cliente
+        // (capturada al momento del upload o import desde Google Drive)
+        try {
+          const uploadEvent = await prisma.custodyEvent.findFirst({
+            where: {
+              evidenceId: context.evidenceId,
+              eventType: { in: ['UPLOAD', 'UPLOAD_GOOGLE_DRIVE'] }
+            },
+            orderBy: { sequence: 'asc' }
+          });
+          if (uploadEvent && uploadEvent.details) {
+            const det = uploadEvent.details;
+            const clientLm = det.clientFileLastModifiedIso || det.googleModifiedTime || null;
+            const clientCreated = det.googleCreatedTime || null;
+            if (!metadata.fileInfo) metadata.fileInfo = {};
+            if (clientLm) metadata.fileInfo.clientFileLastModifiedIso = clientLm;
+            if (clientCreated) metadata.fileInfo.clientFileCreatedIso = clientCreated;
+          }
+        } catch (fsDateErr) {
+          console.warn('[Pipeline] No se pudo recuperar fecha del filesystem cliente:', fsDateErr.message);
+        }
+
         // Guardar reporte de metadata en BD
         await metadataService.saveMetadataReport(context.evidenceId, metadata, null);
 
