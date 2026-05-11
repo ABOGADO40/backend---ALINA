@@ -92,10 +92,19 @@ const ALLOWED_MIME_TYPES = {
   // Videos
   'video/mp4': { ext: ['.mp4'], category: 'VIDEO' },
   'video/mpeg': { ext: ['.mpeg', '.mpg'], category: 'VIDEO' },
-  'video/quicktime': { ext: ['.mov'], category: 'VIDEO' },
+  'video/quicktime': { ext: ['.mov', '.qt'], category: 'VIDEO' },
   'video/x-msvideo': { ext: ['.avi'], category: 'VIDEO' },
   'video/webm': { ext: ['.webm'], category: 'VIDEO' },
   'video/x-matroska': { ext: ['.mkv'], category: 'VIDEO' },
+  // 3GPP - comun en grabaciones moviles (videos cortos, mensajes de voz)
+  'video/3gpp': { ext: ['.3gp', '.3gpp'], category: 'VIDEO' },
+  'video/3gpp2': { ext: ['.3g2', '.3gpp2'], category: 'VIDEO' },
+  'audio/3gpp': { ext: ['.3gp', '.3gpp'], category: 'AUDIO' },
+  'audio/3gpp2': { ext: ['.3g2', '.3gpp2'], category: 'AUDIO' },
+  // Otros formatos de video comunes
+  'video/x-flv': { ext: ['.flv'], category: 'VIDEO' },
+  'video/x-ms-wmv': { ext: ['.wmv'], category: 'VIDEO' },
+  'video/ogg': { ext: ['.ogv'], category: 'VIDEO' },
 
   // Audio
   'audio/mpeg': { ext: ['.mp3'], category: 'AUDIO' },
