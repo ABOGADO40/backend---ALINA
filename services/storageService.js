@@ -313,8 +313,17 @@ class StorageService {
   // CREAR COPIA BIT-A-BIT
   // ==========================================================================
 
-  async createBitcopy(sourceStorageKey, evidenceId, originalFilename, sourceEncrypted = true) {
+  async createBitcopy(sourceStorageKey, evidenceId, originalFilename, sourceEncrypted = true, abortSignal = null) {
     const sourceStream = await this.getFileStream(sourceStorageKey, sourceEncrypted);
+
+    // Si recibimos abortSignal, destruimos el stream al abortar para cortar el pipeline I/O
+    if (abortSignal) {
+      const onAbort = () => {
+        try { sourceStream.destroy(new Error('Operation aborted')); } catch (_) {}
+      };
+      if (abortSignal.aborted) onAbort();
+      else abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
 
     const result = await this.saveFileStream(
       sourceStream,
@@ -335,14 +344,29 @@ class StorageService {
   // CALCULAR HASH SHA-256
   // ==========================================================================
 
-  async calculateHash(storageKey, encrypted = true) {
+  async calculateHash(storageKey, encrypted = true, abortSignal = null) {
     const stream = await this.getFileStream(storageKey, encrypted);
     const hash = crypto.createHash('sha256');
 
     return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        try { stream.destroy(new Error('Operation aborted')); } catch (_) {}
+        reject(new Error('Operation aborted'));
+      };
+      if (abortSignal) {
+        if (abortSignal.aborted) return onAbort();
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
       stream.on('data', chunk => hash.update(chunk));
-      stream.on('end', () => resolve(hash.digest('hex')));
-      stream.on('error', reject);
+      stream.on('end', () => {
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+        resolve(hash.digest('hex'));
+      });
+      stream.on('error', err => {
+        if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+        reject(err);
+      });
     });
   }
 

@@ -12,10 +12,13 @@ const pipelineService = require('../services/pipelineService');
 
 const POLL_INTERVAL_MS = 5000; // 5 segundos
 const MAX_CONCURRENT_JOBS = 2; // Procesar 2 evidencias en paralelo
-const STALE_TIMEOUT_MINUTES = 30; // Considerar estancado despues de 30 minutos
+const STALE_TIMEOUT_MINUTES = 15; // Estados intermedios sin progreso por > 15 min se consideran estancados
+const RECEIVED_STALE_MINUTES = 5; // Evidencias en RECEIVED sin actividad por > 5 min se reprocesan
+const RECOVERY_INTERVAL_POLLS = 12; // Cada 12 polls (~60s) corre recovery exhaustivo
 
 let isRunning = false;
 let activeJobs = 0;
+let pollCounter = 0;
 
 // ============================================================================
 // WORKER PRINCIPAL
@@ -34,6 +37,8 @@ async function startWorker() {
   console.log('[PipelineWorker] Iniciando worker de pipeline...');
   console.log(`[PipelineWorker] Intervalo de polling: ${POLL_INTERVAL_MS}ms`);
   console.log(`[PipelineWorker] Max trabajos concurrentes: ${MAX_CONCURRENT_JOBS}`);
+  console.log(`[PipelineWorker] Stale timeout estados intermedios: ${STALE_TIMEOUT_MINUTES} min`);
+  console.log(`[PipelineWorker] Stale timeout RECEIVED: ${RECEIVED_STALE_MINUTES} min`);
 
   // Recuperar evidencias estancadas al iniciar
   await recoverStaleEvidences();
@@ -56,9 +61,16 @@ function stopWorker() {
 async function pollLoop() {
   while (isRunning) {
     try {
-      // Solo procesar si hay slots disponibles
-      if (activeJobs < MAX_CONCURRENT_JOBS) {
-        await processNextEvidence();
+      // Recovery periodico exhaustivo: vuelve a RECEIVED las evidencias huerfanas
+      pollCounter++;
+      if (pollCounter % RECOVERY_INTERVAL_POLLS === 0) {
+        await recoverStaleEvidences();
+      }
+
+      // Procesar mientras haya slots disponibles (no solo una por poll)
+      while (isRunning && activeJobs < MAX_CONCURRENT_JOBS) {
+        const claimed = await claimAndProcessNextEvidence();
+        if (!claimed) break; // No hay mas evidencias para procesar
       }
     } catch (error) {
       console.error('[PipelineWorker] Error en loop de polling:', error);
@@ -72,42 +84,74 @@ async function pollLoop() {
 }
 
 /**
- * Procesa la siguiente evidencia en cola
+ * Intenta reclamar y procesar la siguiente evidencia en cola usando lock pesimista atomico.
+ *
+ * Lock pesimista: se hace un updateMany con condicion de staleness. Si afecta 1 fila, ESTE
+ * worker la "reclamo". Si afecta 0 filas, otro worker la tomo primero.
+ *
+ * @returns {Promise<boolean>} true si se inicio procesamiento, false si no hay evidencias.
  */
-async function processNextEvidence() {
-  // El worker SOLO recupera evidencias estancadas (más de 30 segundos en RECEIVED)
-  // Las evidencias nuevas son procesadas directamente por el controller
-  const staleTime = new Date(Date.now() - 30 * 1000); // 30 segundos de gracia
+async function claimAndProcessNextEvidence() {
+  // Ventana de gracia: evidencias en RECEIVED necesitan al menos N segundos sin modificacion
+  // para considerar que el controller que las disparo ya fallo o esta atascado.
+  const gracePeriodMs = RECEIVED_STALE_MINUTES * 60 * 1000;
+  const staleTime = new Date(Date.now() - gracePeriodMs);
 
-  const evidence = await prisma.evidence.findFirst({
+  // Paso 1: BUSCAR candidatos (sin lock) - solo para obtener IDs
+  const candidates = await prisma.evidence.findMany({
     where: {
       status: 'RECEIVED',
-      dateTimeModification: { lt: staleTime } // Solo si tiene más de 30 segundos
+      OR: [
+        { dateTimeModification: { lt: staleTime } },
+        { dateTimeModification: null, createdAt: { lt: staleTime } }
+      ]
     },
-    orderBy: {
-      createdAt: 'asc'
-    },
-    select: {
-      id: true,
-      title: true
-    }
+    orderBy: { createdAt: 'asc' },
+    select: { id: true, title: true, dateTimeModification: true, createdAt: true },
+    take: MAX_CONCURRENT_JOBS * 5 // pool de candidatos por si hay carreras
   });
 
-  if (!evidence) {
-    return; // No hay evidencias pendientes para recuperar
+  if (candidates.length === 0) {
+    return false;
   }
 
-  // Procesar de forma asincrona (el pipeline maneja sus propias transiciones de estado)
-  activeJobs++;
-  console.log(`[PipelineWorker] Recuperando evidencia estancada #${evidence.id}: ${evidence.title}`);
-
-  processEvidenceAsync(evidence.id)
-    .catch(error => {
-      console.error(`[PipelineWorker] Error procesando evidencia #${evidence.id}:`, error);
-    })
-    .finally(() => {
-      activeJobs--;
+  // Paso 2: RECLAMAR atomicamente uno por uno hasta que tengamos exito
+  for (const candidate of candidates) {
+    const now = new Date();
+    // updateMany devuelve count; si es 1 = lo tomamos, si es 0 = otro worker se adelanto
+    const claimed = await prisma.evidence.updateMany({
+      where: {
+        id: candidate.id,
+        status: 'RECEIVED',
+        OR: [
+          { dateTimeModification: { lt: staleTime } },
+          { dateTimeModification: null, createdAt: { lt: staleTime } }
+        ]
+      },
+      data: {
+        dateTimeModification: now // Marca como "tomada por mi"
+      }
     });
+
+    if (claimed.count === 1) {
+      // Procesamos de forma asincrona
+      activeJobs++;
+      console.log(`[PipelineWorker] Reclamada evidencia #${candidate.id}: ${candidate.title}`);
+
+      processEvidenceAsync(candidate.id)
+        .catch(error => {
+          console.error(`[PipelineWorker] Error procesando evidencia #${candidate.id}:`, error);
+        })
+        .finally(() => {
+          activeJobs--;
+        });
+
+      return true;
+    }
+    // Si claimed.count === 0, otro worker lo tomo primero. Probamos con el siguiente candidato.
+  }
+
+  return false;
 }
 
 /**
@@ -127,7 +171,7 @@ async function processEvidenceAsync(evidenceId) {
     // Actualizar estado a ERROR
     await prisma.evidence.update({
       where: { id: evidenceId },
-      data: { status: 'ERROR' }
+      data: { status: 'ERROR', dateTimeModification: new Date() }
     }).catch(e => {
       console.error('[PipelineWorker] Error actualizando estado a ERROR:', e);
     });
@@ -135,7 +179,11 @@ async function processEvidenceAsync(evidenceId) {
 }
 
 /**
- * Recupera evidencias que quedaron estancadas
+ * Recupera evidencias que quedaron estancadas.
+ * Se ejecuta al iniciar el worker Y periodicamente cada RECOVERY_INTERVAL_POLLS polls.
+ *
+ * Restablece a RECEIVED las evidencias en estados intermedios cuya dateTimeModification
+ * sea anterior a STALE_TIMEOUT_MINUTES atras.
  */
 async function recoverStaleEvidences() {
   const staleTime = new Date(Date.now() - STALE_TIMEOUT_MINUTES * 60 * 1000);
@@ -153,8 +201,37 @@ async function recoverStaleEvidences() {
   });
 
   if (staleEvidences.count > 0) {
-    console.log(`[PipelineWorker] Recuperadas ${staleEvidences.count} evidencias estancadas`);
+    console.log(`[PipelineWorker] Recuperadas ${staleEvidences.count} evidencias estancadas en estados intermedios`);
   }
+}
+
+/**
+ * Detecta evidencias problematicas (RECEIVED por mucho tiempo o en ERROR) para reportes admin.
+ * No actua sobre ellas, solo informa.
+ */
+async function detectStuckEvidences() {
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+  const [stuckReceived, errorCount] = await Promise.all([
+    prisma.evidence.findMany({
+      where: {
+        status: 'RECEIVED',
+        OR: [
+          { dateTimeModification: { lt: oneHourAgo } },
+          { dateTimeModification: null, createdAt: { lt: oneHourAgo } }
+        ]
+      },
+      select: { id: true, title: true, status: true, createdAt: true, dateTimeModification: true },
+      take: 100
+    }),
+    prisma.evidence.count({ where: { status: 'ERROR' } })
+  ]);
+
+  return {
+    stuckReceived,
+    errorCount,
+    detectedAt: new Date().toISOString()
+  };
 }
 
 /**
@@ -185,6 +262,7 @@ async function getStats() {
     isRunning,
     activeJobs,
     maxConcurrentJobs: MAX_CONCURRENT_JOBS,
+    pollCounter,
     queue: {
       received,
       processing,
@@ -202,7 +280,9 @@ module.exports = {
   startWorker,
   stopWorker,
   getStats,
-  processEvidenceAsync
+  processEvidenceAsync,
+  detectStuckEvidences,
+  recoverStaleEvidences
 };
 
 // ============================================================================

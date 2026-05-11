@@ -879,15 +879,37 @@ const regenerate = async (req, res) => {
       });
     }
 
-    // Solo regenerar si esta en READY_FOR_EXPORT, EXPORTED o ERROR
-    if (!['READY_FOR_EXPORT', 'EXPORTED', 'ERROR'].includes(evidence.status)) {
+    // Estados permitidos:
+    // - Estados terminales (READY_FOR_EXPORT, EXPORTED, ERROR): regenerar siempre
+    // - Estados activos (RECEIVED + intermedios): solo si lleva > 2 min sin actividad (atascada)
+    const terminalStates = ['READY_FOR_EXPORT', 'EXPORTED', 'ERROR'];
+    const activeStates = ['RECEIVED', 'SCANNED_OK', 'HASHED', 'CLONED_BITCOPY', 'SEALED', 'ANALYZED'];
+    const isTerminal = terminalStates.includes(evidence.status);
+    const isActive = activeStates.includes(evidence.status);
+
+    if (!isTerminal && !isActive) {
       return res.status(400).json({
         success: false,
         error: {
           code: 'INVALID_STATE',
-          message: 'Solo se puede regenerar evidencias en estado READY_FOR_EXPORT, EXPORTED o ERROR'
+          message: `Estado no soportado para regeneracion: ${evidence.status}`
         }
       });
+    }
+
+    // Si esta en estado activo, exigir periodo de gracia para evitar pisar pipeline en curso
+    if (isActive) {
+      const lastActivity = evidence.dateTimeModification || evidence.createdAt;
+      const minutesSinceActivity = (Date.now() - new Date(lastActivity).getTime()) / 60000;
+      if (minutesSinceActivity < 2) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'PIPELINE_ACTIVE',
+            message: `La evidencia esta siendo procesada (ultima actividad hace ${minutesSinceActivity.toFixed(1)} min). Intente nuevamente en unos minutos.`
+          }
+        });
+      }
     }
 
     // Actualizar estado a RECEIVED para reprocesar
@@ -895,18 +917,26 @@ const regenerate = async (req, res) => {
       where: { id: parseInt(id) },
       data: {
         status: 'RECEIVED',
-        userIdModification: req.user.id
+        userIdModification: req.user.id,
+        dateTimeModification: new Date()
       }
     });
 
-    // Registrar evento de custodia
-    await custodyService.registerEvent(
-      evidence.id,
-      'REGENERATE_VERSION',
-      'USER',
-      req.user.id,
-      { description: 'Procesamiento regenerado por el usuario' }
-    );
+    // Registrar evento de custodia solo si estaba en estado terminal (cambio explicito de version)
+    // Si estaba activo (atascada), no registramos evento adicional para no contaminar el log
+    if (isTerminal) {
+      try {
+        await custodyService.registerEvent(
+          evidence.id,
+          'REGENERATE_VERSION',
+          'USER',
+          req.user.id,
+          { description: 'Procesamiento regenerado por el usuario', previousStatus: evidence.status }
+        );
+      } catch (custodyErr) {
+        console.warn(`[EvidenceController] No se pudo registrar evento REGENERATE_VERSION: ${custodyErr.message}`);
+      }
+    }
 
     // Disparar pipeline
     pipelineService.processEvidence(evidence.id).catch(err => {
@@ -918,7 +948,10 @@ const regenerate = async (req, res) => {
       data: {
         id: evidence.id,
         status: 'RECEIVED',
-        message: 'Regeneracion iniciada'
+        previousStatus: evidence.status,
+        message: isActive
+          ? 'Evidencia destrabada y reprocesamiento iniciado'
+          : 'Regeneracion iniciada'
       }
     });
 

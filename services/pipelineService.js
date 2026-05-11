@@ -17,9 +17,31 @@ const { STORAGE_STRUCTURE, generateStorageKey } = require('../config/storage');
 // CONFIGURACION
 // ============================================================================
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 5000;
-const STAGE_TIMEOUT_MS = 60000; // 60 segundos por etapa
+const MAX_RETRIES = 2; // 2 reintentos (3 intentos totales) para no agotar timeout adaptativo
+const RETRY_DELAY_MS = 3000; // 3 segundos entre reintentos
+const STAGE_TIMEOUT_BASE_MS = 60000; // 60 segundos base por etapa
+
+// Calculo adaptativo de timeout segun tamaño y tipo de etapa.
+// Asume bandwidth efectivo conservador de 2 MB/s (Wasabi <-> Railway en condiciones lentas).
+const ASSUMED_BANDWIDTH_BYTES_PER_SEC = 2 * 1024 * 1024;
+const MAX_STAGE_TIMEOUT_MS = 30 * 60 * 1000; // Tope absoluto: 30 minutos por etapa
+// Multiplicador por etapa segun cuantas operaciones de I/O ejecuta sobre el archivo completo
+const STAGE_IO_MULTIPLIER = {
+  Scan: 0, // Solo HEAD, no descarga
+  Hash: 1, // Una descarga completa
+  Bitcopy: 3, // Descarga + descifrado + cifrado + subida (~3 pasadas)
+  Sellado: 1, // Lectura del original
+  Analisis: 1, // Lectura del original (imagen completa; video limitado a 10MB)
+  Preparacion: 0 // Solo metadata BD/storage
+};
+
+function _computeStageTimeout(stageName, fileSizeBytes = 0) {
+  const multiplier = STAGE_IO_MULTIPLIER[stageName] ?? 1;
+  const sizeFactor = (fileSizeBytes * multiplier) / ASSUMED_BANDWIDTH_BYTES_PER_SEC;
+  const adaptive = sizeFactor * 1000; // a ms
+  const total = STAGE_TIMEOUT_BASE_MS + adaptive;
+  return Math.min(MAX_STAGE_TIMEOUT_MS, Math.max(STAGE_TIMEOUT_BASE_MS, total));
+}
 
 // Estados del pipeline
 const PIPELINE_STATES = {
@@ -48,6 +70,7 @@ class PipelineService {
    * @returns {Promise<Object>}
    */
   async processEvidence(evidenceId) {
+    const pipelineStartedAt = Date.now();
     console.log(`[Pipeline] Iniciando procesamiento de evidencia ${evidenceId}`);
 
     const evidence = await prisma.evidence.findUnique({
@@ -69,55 +92,94 @@ class PipelineService {
       throw new Error('Archivo original no encontrado');
     }
 
+    // AbortController global del pipeline para propagar cancelacion a operaciones I/O
+    const abortController = new AbortController();
+    const fileSizeBytes = Number(originalFile.sizeBytes || 0);
+
     const context = {
       evidenceId,
       evidence,
       originalFile,
       currentStatus: evidence.status,
-      errors: []
+      errors: [],
+      fileSizeBytes,
+      abortSignal: abortController.signal,
+      abortController
+    };
+
+    // Marcar inmediatamente como "en proceso" actualizando dateTimeModification
+    // Esto evita que el worker la reclame mientras el pipeline esta arrancando
+    await prisma.evidence.update({
+      where: { id: evidenceId },
+      data: { dateTimeModification: new Date() }
+    }).catch(err => console.warn(`[Pipeline] No se pudo marcar evidencia ${evidenceId} al inicio:`, err.message));
+
+    // Heartbeat: actualizar dateTimeModification cada 30s para que el worker no considere "atascada"
+    const heartbeatTimer = setInterval(() => {
+      prisma.evidence.update({
+        where: { id: evidenceId },
+        data: { dateTimeModification: new Date() }
+      }).catch(err => console.warn(`[Pipeline] Heartbeat fallo para ${evidenceId}:`, err.message));
+    }, 30000);
+
+    const stageRun = (stageName, stageFn) => {
+      const timeout = _computeStageTimeout(stageName, fileSizeBytes);
+      console.log(`[Pipeline][${stageName}] Timeout adaptativo: ${(timeout / 1000).toFixed(1)}s (sizeBytes=${fileSizeBytes})`);
+      const stageStartedAt = Date.now();
+      return this._withTimeout(stageFn(context), timeout, stageName, abortController).then(result => {
+        const duration = ((Date.now() - stageStartedAt) / 1000).toFixed(2);
+        console.log(`[Pipeline][${stageName}] Completada en ${duration}s`);
+        return result;
+      });
     };
 
     try {
       // Etapa 1: Scan (si aun no se ha hecho)
       if (context.currentStatus === PIPELINE_STATES.RECEIVED) {
-        await this._withTimeout(this._executeScanStage(context), STAGE_TIMEOUT_MS, 'Scan');
+        await stageRun('Scan', (ctx) => this._executeScanStage(ctx));
       }
 
       // Etapa 2: Hash
       if (context.currentStatus === PIPELINE_STATES.SCANNED_OK) {
-        await this._withTimeout(this._executeHashStage(context), STAGE_TIMEOUT_MS, 'Hash');
+        await stageRun('Hash', (ctx) => this._executeHashStage(ctx));
       }
 
       // Etapa 3: Bitcopy
       if (context.currentStatus === PIPELINE_STATES.HASHED) {
-        await this._withTimeout(this._executeBitcopyStage(context), STAGE_TIMEOUT_MS, 'Bitcopy');
+        await stageRun('Bitcopy', (ctx) => this._executeBitcopyStage(ctx));
       }
 
       // Etapa 4: Sellado
       if (context.currentStatus === PIPELINE_STATES.CLONED_BITCOPY) {
-        await this._withTimeout(this._executeSealStage(context), STAGE_TIMEOUT_MS, 'Sellado');
+        await stageRun('Sellado', (ctx) => this._executeSealStage(ctx));
       }
 
       // Etapa 5: Analisis (Metadata + Risk)
       if (context.currentStatus === PIPELINE_STATES.SEALED) {
-        await this._withTimeout(this._executeAnalysisStage(context), STAGE_TIMEOUT_MS, 'Analisis');
+        await stageRun('Analisis', (ctx) => this._executeAnalysisStage(ctx));
       }
 
       // Etapa 6: Preparacion para exportacion
       if (context.currentStatus === PIPELINE_STATES.ANALYZED) {
-        await this._withTimeout(this._executePreparationStage(context), STAGE_TIMEOUT_MS, 'Preparacion');
+        await stageRun('Preparacion', (ctx) => this._executePreparationStage(ctx));
       }
 
-      console.log(`[Pipeline] Evidencia ${evidenceId} procesada exitosamente`);
+      const totalDuration = ((Date.now() - pipelineStartedAt) / 1000).toFixed(2);
+      console.log(`[Pipeline] Evidencia ${evidenceId} procesada exitosamente en ${totalDuration}s`);
 
       return {
         success: true,
         evidenceId,
-        finalStatus: context.currentStatus
+        finalStatus: context.currentStatus,
+        durationSeconds: parseFloat(totalDuration)
       };
 
     } catch (error) {
-      console.error(`[Pipeline] Error procesando evidencia ${evidenceId}:`, error);
+      const totalDuration = ((Date.now() - pipelineStartedAt) / 1000).toFixed(2);
+      console.error(`[Pipeline] Error procesando evidencia ${evidenceId} (tras ${totalDuration}s, stage=${context.currentStatus}):`, error.message);
+
+      // Cancelar operaciones I/O pendientes
+      try { abortController.abort(); } catch (_) { /* noop */ }
 
       // Registrar error
       await this._handlePipelineError(context, error);
@@ -126,8 +188,11 @@ class PipelineService {
         success: false,
         evidenceId,
         error: error.message,
-        stage: context.currentStatus
+        stage: context.currentStatus,
+        durationSeconds: parseFloat(totalDuration)
       };
+    } finally {
+      clearInterval(heartbeatTimer);
     }
   }
 
@@ -139,6 +204,7 @@ class PipelineService {
     console.log(`[Pipeline] Etapa 1: Scan - Evidencia ${context.evidenceId}`);
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (context.abortSignal?.aborted) throw new Error('Pipeline aborted');
       try {
         // Validacion de tipo de archivo
         const fileInfo = await storageService.getFileInfo(context.originalFile.storageKey);
@@ -193,16 +259,18 @@ class PipelineService {
     console.log(`[Pipeline] Etapa 2: Hash - Evidencia ${context.evidenceId}`);
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (context.abortSignal?.aborted) throw new Error('Pipeline aborted');
       try {
         // Verificar si ya tiene hash
         let hashHex;
         if (context.originalFile.hashRecords.length > 0) {
           hashHex = context.originalFile.hashRecords[0].hashHex;
         } else {
-          // Calcular hash del archivo original
+          // Calcular hash del archivo original (con cancelacion)
           hashHex = await storageService.calculateHash(
             context.originalFile.storageKey,
-            context.originalFile.isEncrypted
+            context.originalFile.isEncrypted,
+            context.abortSignal
           );
 
           // Guardar registro de hash
@@ -244,13 +312,15 @@ class PipelineService {
     console.log(`[Pipeline] Etapa 3: Bitcopy - Evidencia ${context.evidenceId}`);
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (context.abortSignal?.aborted) throw new Error('Pipeline aborted');
       try {
-        // Crear copia bit-a-bit
+        // Crear copia bit-a-bit (con cancelacion propagada)
         const bitcopyResult = await storageService.createBitcopy(
           context.originalFile.storageKey,
           context.evidenceId,
           context.originalFile.originalFilename,
-          context.originalFile.isEncrypted
+          context.originalFile.isEncrypted,
+          context.abortSignal
         );
 
         // Obtener version actual
@@ -313,6 +383,7 @@ class PipelineService {
     console.log(`[Pipeline] Etapa 4: Sellado - Evidencia ${context.evidenceId}`);
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (context.abortSignal?.aborted) throw new Error('Pipeline aborted');
       try {
         // Obtener version actual
         const maxVersion = await evidenceModel.getMaxVersion(context.evidenceId, 'SEALED');
@@ -403,6 +474,7 @@ class PipelineService {
     console.log(`[Pipeline] Etapa 5: Analisis - Evidencia ${context.evidenceId}`);
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (context.abortSignal?.aborted) throw new Error('Pipeline aborted');
       try {
         // Extraer metadata
         const metadata = await metadataService.extractMetadata(
@@ -515,6 +587,7 @@ class PipelineService {
     console.log(`[Pipeline] Etapa 6: Preparacion - Evidencia ${context.evidenceId}`);
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (context.abortSignal?.aborted) throw new Error('Pipeline aborted');
       try {
         // Verificar que existen todos los componentes obligatorios
         const requiredRoles = ['ORIGINAL', 'BITCOPY', 'SEALED', 'CERT_PDF', 'CERT_TXT'];
@@ -632,10 +705,14 @@ class PipelineService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  _withTimeout(promise, ms, stageName) {
+  _withTimeout(promise, ms, stageName, abortController = null) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(`[Pipeline] Timeout: etapa '${stageName}' excedio ${ms / 1000}s`));
+        // Cancelar operaciones subyacentes para evitar huerfanos
+        if (abortController && !abortController.signal.aborted) {
+          try { abortController.abort(); } catch (_) { /* noop */ }
+        }
+        reject(new Error(`[Pipeline] Timeout: etapa '${stageName}' excedio ${(ms / 1000).toFixed(1)}s`));
       }, ms);
 
       promise
