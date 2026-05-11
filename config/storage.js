@@ -100,9 +100,17 @@ const ALLOWED_MIME_TYPES = {
   // Audio
   'audio/mpeg': { ext: ['.mp3'], category: 'AUDIO' },
   'audio/wav': { ext: ['.wav'], category: 'AUDIO' },
-  'audio/ogg': { ext: ['.ogg'], category: 'AUDIO' },
-  'audio/aac': { ext: ['.aac'], category: 'AUDIO' },
+  'audio/wave': { ext: ['.wav'], category: 'AUDIO' },
+  'audio/x-wav': { ext: ['.wav'], category: 'AUDIO' },
+  'audio/ogg': { ext: ['.ogg', '.oga'], category: 'AUDIO' },
+  'audio/aac': { ext: ['.aac', '.m4a'], category: 'AUDIO' },
   'audio/x-m4a': { ext: ['.m4a'], category: 'AUDIO' },
+  // M4A es contenedor MP4 con solo audio; file-type lo detecta como audio/mp4
+  'audio/mp4': { ext: ['.m4a', '.m4b', '.m4p', '.mp4'], category: 'AUDIO' },
+  'audio/flac': { ext: ['.flac'], category: 'AUDIO' },
+  'audio/x-flac': { ext: ['.flac'], category: 'AUDIO' },
+  'audio/webm': { ext: ['.weba'], category: 'AUDIO' },
+  'audio/opus': { ext: ['.opus'], category: 'AUDIO' },
 
   // Archivos comprimidos
   'application/zip': { ext: ['.zip'], category: 'ZIP' },

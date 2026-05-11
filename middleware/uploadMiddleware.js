@@ -113,11 +113,18 @@ const validateUploadedFile = async (req, res, next) => {
       if (!isAllowedMimeType(detectedType.mime)) {
         // Eliminar archivo temporal
         await fs.promises.unlink(req.file.path);
+        const ext = path.extname(req.file.originalname).toLowerCase();
         return res.status(400).json({
           success: false,
           error: {
             code: 'FILE_TYPE_INVALID',
-            message: `Tipo de archivo no permitido: ${detectedType.mime}`
+            message: `Tipo de archivo no permitido. Detectado: ${detectedType.mime} (extension ${ext}). Si crees que es un error, contacta al administrador.`,
+            details: {
+              detectedMime: detectedType.mime,
+              detectedExt: detectedType.ext,
+              originalExt: ext,
+              originalFilename: req.file.originalname
+            }
           }
         });
       }
