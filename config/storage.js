@@ -160,6 +160,26 @@ function generateStorageKey(folder, evidenceId, originalFilename) {
 }
 
 /**
+ * Genera un storage key DETERMINISTICO basado en hash del contenido + ownerId.
+ * Permite subir a S3 ANTES de crear el registro en BD (carga idempotente).
+ * Formato: {folder}/by-hash/{year}/{month}/{ownerId}/{hashPrefix}/{filename}
+ *
+ * Si el mismo owner sube el mismo archivo dos veces en el mismo mes,
+ * el storageKey sera identico y la idempotencia funciona naturalmente.
+ */
+function generateStorageKeyByHash(folder, hashHex, ownerId, originalFilename) {
+  if (!hashHex || hashHex.length < 16) {
+    throw new Error('hashHex invalido para generateStorageKeyByHash');
+  }
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const hashPrefix = hashHex.substring(0, 16); // 16 chars = 64 bits, mas que suficiente
+  const safeFilename = sanitizeFilename(originalFilename);
+  return `${folder}/by-hash/${year}/${month}/${ownerId || 'anon'}/${hashPrefix}/${safeFilename}`;
+}
+
+/**
  * Sanitiza un nombre de archivo eliminando caracteres peligrosos
  */
 function sanitizeFilename(filename) {
@@ -251,6 +271,7 @@ module.exports = {
   // Funciones
   initializeStorageStructure,
   generateStorageKey,
+  generateStorageKeyByHash,
   sanitizeFilename,
   getFullPath,
   isAllowedMimeType,

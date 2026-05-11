@@ -9,7 +9,7 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { prisma } = require('../config/db');
 const { createAuditLog } = require('../services/auditService');
 const storageService = require('../services/storageService');
-const { getMimeCategory } = require('../config/storage');
+const { getMimeCategory, generateStorageKeyByHash, STORAGE_STRUCTURE } = require('../config/storage');
 const pipelineService = require('../services/pipelineService');
 const custodyService = require('../services/custodyService');
 const actaService = require('../services/actaService');
@@ -345,44 +345,20 @@ const uploadEvidence = async (req, res) => {
       }
     }
 
-    // PASO 1: Crear evidencia y registro de archivo en transaccion (sin mover archivo aun)
-    const { evidence, evidenceFile } = await prisma.$transaction(async (tx) => {
-      // Crear evidencia
-      const newEvidence = await tx.evidence.create({
-        data: {
-          ownerUserId: req.user.id,
-          caseId: parsedCaseId,
-          title: title || file.originalname,
-          description: description || null,
-          sourceType: req.sourceType || 'OTHER',
-          status: 'RECEIVED',
-          isPublic: true,
-          userIdRegistration: req.user.id
-        }
-      });
+    // =====================================================================
+    // FLUJO IDEMPOTENTE: hash -> dedupe -> S3 -> BD
+    //
+    // Garantias:
+    //  - Si Railway mata el proceso ANTES de S3: solo se borra el archivo /tmp (no hay BD)
+    //  - Si Railway mata el proceso DURANTE S3: archivo S3 incompleto, pero NO hay BD huerfana
+    //  - Si Railway mata el proceso DESPUES de S3 pero ANTES de BD: archivo S3 huerfano (cleanup lo eliminara)
+    //  - Si Railway mata el proceso DESPUES de BD: pipeline reintentara y procesara
+    //  - Reintento del cliente con mismo archivo: idempotencia por SHA-256 devuelve la evidencia existente
+    // =====================================================================
 
-      // Crear registro de archivo con storageKey temporal (se actualizara despues)
-      const newFile = await tx.evidenceFile.create({
-        data: {
-          evidenceId: newEvidence.id,
-          fileRole: 'ORIGINAL',
-          storageKey: `pending/${newEvidence.id}/${file.originalname}`,
-          originalFilename: file.originalname,
-          mimeType: req.detectedMimeType || file.mimetype,
-          sizeBytes: file.size,
-          isEncrypted: false,
-          version: 1,
-          userIdRegistration: req.user.id
-        }
-      });
-
-      return { evidence: newEvidence, evidenceFile: newFile };
-    });
-
-    // PASO 1.5: Calcular SHA-256 del archivo original ANTES de almacenarlo (Cambio 4 - NIST SP 800-86)
-    // Tambien contar bytes reales para sizeBytes (correccion forense critica)
     const crypto = require('crypto');
-    const fs = require('fs');
+
+    // PASO 1: Calcular SHA-256 + tamano del archivo en /tmp (sin tocar BD ni S3 aun)
     const { fileHash, bytesRead } = await new Promise((resolve, reject) => {
       const hash = crypto.createHash('sha256');
       let totalBytes = 0;
@@ -396,12 +372,9 @@ const uploadEvidence = async (req, res) => {
     });
     const sha256CalculatedAtUtc = new Date().toISOString();
 
-    // Validacion forense: archivo no puede estar vacio
+    // PASO 2: Validacion forense - archivo no puede estar vacio
     if (bytesRead === 0) {
-      // Limpiar registros creados en BD
-      await prisma.evidenceFile.delete({ where: { id: evidenceFile.id } }).catch(() => {});
-      await prisma.evidence.delete({ where: { id: evidence.id } }).catch(() => {});
-
+      await fs.promises.unlink(file.path).catch(() => {});
       return res.status(422).json({
         success: false,
         error: {
@@ -412,42 +385,204 @@ const uploadEvidence = async (req, res) => {
       });
     }
 
-    // PASO 2: Mover archivo a almacenamiento permanente (DESPUES de la transaccion)
+    // PASO 3: IDEMPOTENCIA - Si este owner ya subio el mismo archivo (mismo hash) en estado
+    // procesable (no ERROR), devolvemos esa evidencia y descartamos esta carga.
+    const existingByHash = await prisma.hashRecord.findFirst({
+      where: {
+        hashHex: fileHash,
+        evidenceFile: {
+          fileRole: 'ORIGINAL',
+          evidence: {
+            ownerUserId: req.user.id,
+            status: { not: 'ERROR' }
+          }
+        }
+      },
+      include: {
+        evidenceFile: {
+          include: { evidence: { select: { id: true, title: true, status: true } } }
+        }
+      }
+    });
+
+    if (existingByHash && existingByHash.evidenceFile?.evidence) {
+      const existingEvidence = existingByHash.evidenceFile.evidence;
+      console.log(`[EvidenceController] Carga idempotente: hash ${fileHash.substring(0, 16)}... ya existe como evidencia ${existingEvidence.id}`);
+      await fs.promises.unlink(file.path).catch(() => {});
+      return res.status(200).json({
+        success: true,
+        data: {
+          id: existingEvidence.id,
+          title: existingEvidence.title,
+          status: existingEvidence.status,
+          isDuplicate: true,
+          message: 'Esta evidencia ya fue subida previamente. Se muestra la existente.'
+        }
+      });
+    }
+
+    // PASO 4: Subir a Wasabi con storageKey determinista por hash.
+    // Si Railway mata el proceso aqui, NO queda BD huerfana.
+    const predeterminedStorageKey = generateStorageKeyByHash(
+      STORAGE_STRUCTURE.ORIGINAL,
+      fileHash,
+      req.user.id,
+      file.originalname
+    );
+
+    // PRE-CHECK: si el archivo ya existe en S3 (carga paralela o reintento del cliente),
+    // reusamos el archivo existente sin sobreescribirlo (evita romper el cifrado AES-GCM).
     let stored;
-    try {
-      stored = await storageService.storeOriginal(
-        file.path,
-        evidence.id,
-        file.originalname,
-        req.detectedMimeType || file.mimetype
-      );
-    } catch (storageError) {
-      // Si falla el almacenamiento, limpiar registros de BD y retornar error con instrucciones de reintento
-      console.error('[EvidenceController] Error almacenando archivo:', storageError);
+    const alreadyInStorage = await storageService.getFileInfo(predeterminedStorageKey);
+    if (alreadyInStorage.exists) {
+      console.log(`[EvidenceController] Archivo ya existe en S3 con key ${predeterminedStorageKey}, reusando.`);
+      stored = {
+        storageKey: predeterminedStorageKey,
+        sizeBytes: alreadyInStorage.sizeBytes,
+        hash: fileHash,
+        isEncrypted: alreadyInStorage.encrypted
+      };
+      // Limpiar el archivo temporal local
+      await fs.promises.unlink(file.path).catch(() => {});
+    } else {
+      try {
+        stored = await storageService.storeOriginal(
+          file.path,
+          null, // evidenceId no se usa cuando se pasa options.storageKey
+          file.originalname,
+          req.detectedMimeType || file.mimetype,
+          { storageKey: predeterminedStorageKey }
+        );
+      } catch (storageError) {
+        console.error('[EvidenceController] Error almacenando archivo en S3:', storageError);
+        // No hay BD que limpiar (aun no se creo). storeOriginal ya elimina el tmp en su catch.
+        return res.status(500).json({
+          success: false,
+          error: {
+            code: 'STORAGE_ERROR',
+            message: 'Error al almacenar el archivo. Por favor, intente nuevamente.',
+            details: storageError.message,
+            canRetry: true
+          }
+        });
+      }
+    }
 
-      // Limpiar registros creados en BD
-      await prisma.evidenceFile.delete({ where: { id: evidenceFile.id } }).catch(() => {});
-      await prisma.evidence.delete({ where: { id: evidence.id } }).catch(() => {});
-
+    // Validacion de integridad: el hash calculado durante la subida debe coincidir con el pre-calculado
+    if (stored.hash !== fileHash) {
+      console.error(`[EvidenceController] Hash mismatch: pre=${fileHash.substring(0, 16)}, post=${stored.hash.substring(0, 16)}`);
+      await storageService.deleteFile(stored.storageKey).catch(() => {});
       return res.status(500).json({
         success: false,
         error: {
-          code: 'STORAGE_ERROR',
-          message: 'Error al almacenar el archivo. Por favor, intente nuevamente.',
-          details: storageError.message,
+          code: 'HASH_MISMATCH',
+          message: 'Inconsistencia detectada al subir el archivo. Por favor, intente nuevamente.',
           canRetry: true
         }
       });
     }
 
-    // PASO 3: Actualizar registro de archivo con storageKey real
-    await prisma.evidenceFile.update({
-      where: { id: evidenceFile.id },
-      data: {
-        storageKey: stored.storageKey,
-        isEncrypted: stored.isEncrypted
+    // PASO 5: Crear evidencia + evidenceFile + hashRecord en transaccion atomica
+    // CON storageKey DEFINITIVO (sin estado "pending/...")
+    let evidence, evidenceFile;
+    try {
+      const txResult = await prisma.$transaction(async (tx) => {
+        // Re-chequear idempotencia DENTRO de la transaccion para cubrir condiciones de carrera
+        const raceCheck = await tx.hashRecord.findFirst({
+          where: {
+            hashHex: fileHash,
+            evidenceFile: {
+              fileRole: 'ORIGINAL',
+              evidence: {
+                ownerUserId: req.user.id,
+                status: { not: 'ERROR' }
+              }
+            }
+          },
+          include: { evidenceFile: { include: { evidence: true } } }
+        });
+        if (raceCheck && raceCheck.evidenceFile?.evidence) {
+          // Otro request paralelo creo la evidencia primero. Devolvemos la existente.
+          return { evidence: raceCheck.evidenceFile.evidence, evidenceFile: raceCheck.evidenceFile, raced: true };
+        }
+
+        const newEvidence = await tx.evidence.create({
+          data: {
+            ownerUserId: req.user.id,
+            caseId: parsedCaseId,
+            title: title || file.originalname,
+            description: description || null,
+            sourceType: req.sourceType || 'OTHER',
+            status: 'RECEIVED',
+            isPublic: true,
+            userIdRegistration: req.user.id
+          }
+        });
+
+        const newFile = await tx.evidenceFile.create({
+          data: {
+            evidenceId: newEvidence.id,
+            fileRole: 'ORIGINAL',
+            storageKey: stored.storageKey, // DEFINITIVO desde el inicio
+            originalFilename: file.originalname,
+            mimeType: req.detectedMimeType || file.mimetype,
+            sizeBytes: stored.sizeBytes,
+            isEncrypted: stored.isEncrypted,
+            version: 1,
+            userIdRegistration: req.user.id
+          }
+        });
+
+        // Persistir hash record desde aqui (el pipeline lo detectara y saltara la etapa Hash)
+        await tx.hashRecord.create({
+          data: {
+            evidenceFileId: newFile.id,
+            algorithm: 'SHA256',
+            hashHex: fileHash,
+            userIdRegistration: req.user.id
+          }
+        });
+
+        return { evidence: newEvidence, evidenceFile: newFile, raced: false };
+      });
+
+      // Si hubo race condition, devolver la evidencia existente y limpiar el S3 que acabamos de subir
+      if (txResult.raced) {
+        console.log(`[EvidenceController] Race condition detectada: evidencia ya existia. Limpiando S3 redundante.`);
+        // El storageKey predeterminado por hash es identico al ya existente, asi que NO eliminamos:
+        // si lo eliminamos podriamos romper la evidencia previa que apunta a la misma key.
+        // El cifrado nuevo sobreescribio el iv/authTag, lo cual SI puede romper la primera.
+        // Para ser seguros, no hacer cleanup aqui; el archivo S3 quedo en estado consistente con la transaccion ganadora.
+        return res.status(200).json({
+          success: true,
+          data: {
+            id: txResult.evidence.id,
+            title: txResult.evidence.title,
+            status: txResult.evidence.status,
+            isDuplicate: true,
+            message: 'Esta evidencia ya fue subida en paralelo. Se muestra la existente.'
+          }
+        });
       }
-    });
+
+      evidence = txResult.evidence;
+      evidenceFile = txResult.evidenceFile;
+    } catch (dbError) {
+      console.error('[EvidenceController] Error creando registros en BD:', dbError);
+      // Cleanup: eliminar archivo recien subido a S3 ya que no quedo BD asociada
+      await storageService.deleteFile(stored.storageKey).catch(e =>
+        console.error('[EvidenceController] Error limpiando S3 tras fallo BD:', e.message)
+      );
+      return res.status(500).json({
+        success: false,
+        error: {
+          code: 'DATABASE_ERROR',
+          message: 'Error al registrar la evidencia. Por favor, intente nuevamente.',
+          details: dbError.message,
+          canRetry: true
+        }
+      });
+    }
 
     // Fecha de modificacion del archivo segun el filesystem del cliente (enviada por el frontend)
     // Es la unica fuente de verdad disponible: HTTP multipart NO transmite timestamps del FS original
@@ -910,6 +1045,53 @@ const regenerate = async (req, res) => {
           }
         });
       }
+    }
+
+    // PRECHECK: verificar que el archivo original realmente existe en Wasabi.
+    // Si no esta, regenerar es inutil - hay que volver a subirlo.
+    const originalFileRecord = await prisma.evidenceFile.findFirst({
+      where: { evidenceId: parseInt(id), fileRole: 'ORIGINAL' },
+      orderBy: { version: 'desc' }
+    });
+
+    if (!originalFileRecord) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'NO_ORIGINAL_FILE',
+          message: 'Esta evidencia no tiene archivo original registrado. Debe subirla nuevamente.'
+        }
+      });
+    }
+
+    if (String(originalFileRecord.storageKey || '').startsWith('pending/')) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'UPLOAD_INCOMPLETE',
+          message: 'La subida original nunca se completo. El archivo no esta en almacenamiento. Por favor, suba la evidencia nuevamente desde cero.',
+          recoverable: false,
+          action: 'reupload'
+        }
+      });
+    }
+
+    try {
+      const fileInfo = await storageService.getFileInfo(originalFileRecord.storageKey);
+      if (!fileInfo.exists) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'FILE_NOT_IN_STORAGE',
+            message: 'El archivo original no se encuentra en almacenamiento. Pudo haberse perdido o la subida no completo. Por favor, suba la evidencia nuevamente.',
+            recoverable: false,
+            action: 'reupload'
+          }
+        });
+      }
+    } catch (storageErr) {
+      console.warn(`[EvidenceController] Precheck storage fallo para evidencia ${id}: ${storageErr.message}`);
+      // Si el check falla por error transitorio (red), permitimos seguir y dejar que el pipeline reintente
     }
 
     // Actualizar estado a RECEIVED para reprocesar
@@ -1668,66 +1850,84 @@ const importFromDrive = async (req, res) => {
           continue;
         }
 
-        // 3. Crear Evidence + EvidenceFile en transaccion
         const evidenceTitle = fileIds.length === 1 && title
           ? title
           : (title ? `${title} - ${googleMeta.originalFilename}` : googleMeta.originalFilename);
 
-        const { evidence, evidenceFile } = await prisma.$transaction(async (tx) => {
-          const newEvidence = await tx.evidence.create({
-            data: {
-              ownerUserId: req.user.id,
-              caseId: parsedCaseId,
-              title: evidenceTitle,
-              description: description || null,
-              sourceType: getMimeCategory(googleMeta.mimeType) || 'OTHER',
-              status: 'RECEIVED',
-              isPublic: true,
-              userIdRegistration: req.user.id
-            }
+        // 2.5 IDEMPOTENCIA PRE-DESCARGA: si Google reporta sha256Checksum y este owner
+        // ya tiene una evidencia con ese hash en estado procesable, devolverla sin descargar.
+        if (googleMeta.sha256Checksum) {
+          const preExisting = await prisma.hashRecord.findFirst({
+            where: {
+              hashHex: googleMeta.sha256Checksum,
+              evidenceFile: {
+                fileRole: 'ORIGINAL',
+                evidence: {
+                  ownerUserId: req.user.id,
+                  status: { not: 'ERROR' }
+                }
+              }
+            },
+            include: { evidenceFile: { include: { evidence: { select: { id: true, title: true, status: true } } } } }
           });
+          if (preExisting && preExisting.evidenceFile?.evidence) {
+            const ev = preExisting.evidenceFile.evidence;
+            console.log(`[ImportDrive] Carga idempotente (pre-download): hash ${googleMeta.sha256Checksum.substring(0, 16)}... ya existe como evidencia ${ev.id}`);
+            results.push({
+              fileId,
+              fileName: googleMeta.originalFilename,
+              success: true,
+              evidenceId: ev.id,
+              integrityVerified: true,
+              isDuplicate: true,
+              message: 'Esta evidencia ya fue importada previamente'
+            });
+            continue;
+          }
+        }
 
-          const newFile = await tx.evidenceFile.create({
-            data: {
-              evidenceId: newEvidence.id,
-              fileRole: 'ORIGINAL',
-              storageKey: `pending/${newEvidence.id}/${googleMeta.originalFilename}`,
-              originalFilename: googleMeta.originalFilename,
-              mimeType: googleMeta.mimeType,
-              sizeBytes: googleMeta.sizeBytes,
-              isEncrypted: false,
-              version: 1,
-              userIdRegistration: req.user.id
-            }
-          });
+        // 3. Subir a Wasabi PRIMERO (con storageKey por hash si Google da hash, sino UUID temporal)
+        const predeterminedKey = googleMeta.sha256Checksum
+          ? generateStorageKeyByHash(STORAGE_STRUCTURE.ORIGINAL, googleMeta.sha256Checksum, req.user.id, googleMeta.originalFilename)
+          : null;
 
-          return { evidence: newEvidence, evidenceFile: newFile };
-        });
+        // PRE-CHECK: si predeterminedKey existe en S3, reusarlo (carga paralela o reintento)
+        let stored;
+        if (predeterminedKey) {
+          const exists = await storageService.getFileInfo(predeterminedKey);
+          if (exists.exists) {
+            console.log(`[ImportDrive] Archivo ya existe en S3 con key ${predeterminedKey}, reusando (sin descargar).`);
+            stored = {
+              storageKey: predeterminedKey,
+              sizeBytes: exists.sizeBytes,
+              hash: googleMeta.sha256Checksum,
+              isEncrypted: exists.encrypted
+            };
+          }
+        }
 
-        // 4. Descargar archivo como stream desde Google Drive
-        console.log(`[ImportDrive] Descargando archivo de Google Drive...`);
-        const fileStream = await googleDriveService.downloadFileStream(accessToken, fileId);
+        if (!stored) {
+          console.log(`[ImportDrive] Descargando archivo de Google Drive...`);
+          const fileStream = await googleDriveService.downloadFileStream(accessToken, fileId);
 
-        // 5. Almacenar con cifrado + hash (usa saveFileStream directamente)
-        const stored = await storageService.saveFileStream(
-          fileStream,
-          'original',
-          evidence.id,
-          googleMeta.originalFilename,
-          true // cifrar
-        );
+          stored = await storageService.saveFileStream(
+            fileStream,
+            STORAGE_STRUCTURE.ORIGINAL,
+            null, // evidenceId no se usa si options.storageKey esta presente
+            googleMeta.originalFilename,
+            true,
+            predeterminedKey ? { storageKey: predeterminedKey } : {}
+          );
+        }
 
-        // 6. Verificacion cruzada de integridad
+        // 4. Verificacion cruzada de integridad (si Google reporto hash)
         const integrityMatch = googleMeta.sha256Checksum
           ? stored.hash === googleMeta.sha256Checksum
-          : null; // null si Google no proporciono hash (raro pero posible)
+          : null;
 
         if (integrityMatch === false) {
           console.error(`[ImportDrive] FALLO INTEGRIDAD: local=${stored.hash} vs google=${googleMeta.sha256Checksum}`);
-          // Limpiar registros
-          await prisma.evidenceFile.delete({ where: { id: evidenceFile.id } }).catch(() => {});
-          await prisma.evidence.delete({ where: { id: evidence.id } }).catch(() => {});
-
+          await storageService.deleteFile(stored.storageKey).catch(() => {});
           results.push({
             fileId,
             fileName: googleMeta.originalFilename,
@@ -1737,15 +1937,96 @@ const importFromDrive = async (req, res) => {
           continue;
         }
 
-        // 7. Actualizar EvidenceFile con storageKey real
-        await prisma.evidenceFile.update({
-          where: { id: evidenceFile.id },
-          data: {
-            storageKey: stored.storageKey,
-            sizeBytes: stored.sizeBytes,
-            isEncrypted: stored.isEncrypted
-          }
+        // 5. IDEMPOTENCIA POST-DESCARGA (cubre el caso donde Google no reporto hash)
+        const postExisting = await prisma.hashRecord.findFirst({
+          where: {
+            hashHex: stored.hash,
+            evidenceFile: {
+              fileRole: 'ORIGINAL',
+              evidence: {
+                ownerUserId: req.user.id,
+                status: { not: 'ERROR' }
+              }
+            }
+          },
+          include: { evidenceFile: { include: { evidence: { select: { id: true, title: true, status: true } } } } }
         });
+        if (postExisting && postExisting.evidenceFile?.evidence) {
+          const ev = postExisting.evidenceFile.evidence;
+          console.log(`[ImportDrive] Carga idempotente (post-download): hash ${stored.hash.substring(0, 16)}... ya existe como evidencia ${ev.id}`);
+          // Limpieza: si subimos a una key UUID nueva (no por hash), eliminarla
+          if (!predeterminedKey) {
+            await storageService.deleteFile(stored.storageKey).catch(() => {});
+          }
+          results.push({
+            fileId,
+            fileName: googleMeta.originalFilename,
+            success: true,
+            evidenceId: ev.id,
+            integrityVerified: true,
+            isDuplicate: true,
+            message: 'Esta evidencia ya fue importada previamente'
+          });
+          continue;
+        }
+
+        // 6. Crear evidence + evidenceFile + hashRecord en transaccion atomica
+        let evidence, evidenceFile;
+        try {
+          const txResult = await prisma.$transaction(async (tx) => {
+            const newEvidence = await tx.evidence.create({
+              data: {
+                ownerUserId: req.user.id,
+                caseId: parsedCaseId,
+                title: evidenceTitle,
+                description: description || null,
+                sourceType: getMimeCategory(googleMeta.mimeType) || 'OTHER',
+                status: 'RECEIVED',
+                isPublic: true,
+                userIdRegistration: req.user.id
+              }
+            });
+
+            const newFile = await tx.evidenceFile.create({
+              data: {
+                evidenceId: newEvidence.id,
+                fileRole: 'ORIGINAL',
+                storageKey: stored.storageKey,
+                originalFilename: googleMeta.originalFilename,
+                mimeType: googleMeta.mimeType,
+                sizeBytes: stored.sizeBytes,
+                isEncrypted: stored.isEncrypted,
+                version: 1,
+                userIdRegistration: req.user.id
+              }
+            });
+
+            await tx.hashRecord.create({
+              data: {
+                evidenceFileId: newFile.id,
+                algorithm: 'SHA256',
+                hashHex: stored.hash,
+                userIdRegistration: req.user.id
+              }
+            });
+
+            return { evidence: newEvidence, evidenceFile: newFile };
+          });
+          evidence = txResult.evidence;
+          evidenceFile = txResult.evidenceFile;
+        } catch (dbError) {
+          console.error(`[ImportDrive] Error creando registros BD:`, dbError);
+          if (!predeterminedKey) {
+            await storageService.deleteFile(stored.storageKey).catch(() => {});
+          }
+          results.push({
+            fileId,
+            fileName: googleMeta.originalFilename,
+            success: false,
+            error: `Error al registrar la evidencia en base de datos: ${dbError.message}`
+          });
+          continue;
+        }
 
         // 8. Registrar evento de custodia
         const sha256CalculatedAtUtc = new Date().toISOString();

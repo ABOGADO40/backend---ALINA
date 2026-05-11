@@ -137,12 +137,14 @@ class StorageService {
   // GUARDAR ARCHIVO CON STREAMING Y HASH (para archivos grandes hasta 2GB)
   // ==========================================================================
 
-  async saveFileStream(readStream, folder, evidenceId, originalFilename, encrypt = true) {
+  async saveFileStream(readStream, folder, evidenceId, originalFilename, encrypt = true, options = {}) {
     if (isBlockedExtension(originalFilename)) {
       throw new Error(`Extension de archivo bloqueada: ${path.extname(originalFilename)}`);
     }
 
-    const storageKey = generateStorageKey(folder, evidenceId, originalFilename);
+    // Si se provee storageKey explicito (carga idempotente por hash), usarlo;
+    // si no, generar key clasica basada en evidenceId.
+    const storageKey = options.storageKey || generateStorageKey(folder, evidenceId, originalFilename);
 
     // Calcular hash SHA-256 mientras se procesa
     const hashCalculator = crypto.createHash('sha256');
@@ -272,7 +274,7 @@ class StorageService {
   // GUARDAR ARCHIVO ORIGINAL DESDE PATH TEMPORAL (usado por Multer)
   // ==========================================================================
 
-  async storeOriginal(tempFilePath, evidenceId, originalFilename, mimeType) {
+  async storeOriginal(tempFilePath, evidenceId, originalFilename, mimeType, options = {}) {
     if (!fs.existsSync(tempFilePath)) {
       throw new Error(`Archivo temporal no encontrado: ${tempFilePath}`);
     }
@@ -285,7 +287,8 @@ class StorageService {
         STORAGE_STRUCTURE.ORIGINAL,
         evidenceId,
         originalFilename,
-        true // Cifrar por defecto
+        true, // Cifrar por defecto
+        options // Permite options.storageKey para carga idempotente
       );
 
       // Eliminar archivo temporal local

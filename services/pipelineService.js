@@ -203,6 +203,22 @@ class PipelineService {
   async _executeScanStage(context) {
     console.log(`[Pipeline] Etapa 1: Scan - Evidencia ${context.evidenceId}`);
 
+    // Pre-check: detectar storageKey "pending/..." que indica subida incompleta.
+    // Esto NO debe reintentarse: el archivo nunca llego a Wasabi.
+    const storageKey = context.originalFile.storageKey || '';
+    if (storageKey.startsWith('pending/')) {
+      const err = new Error('La subida original nunca se completo: el archivo no esta en almacenamiento. Por favor, vuelva a subir el archivo.');
+      err.code = 'UPLOAD_INCOMPLETE';
+      console.error(`[Pipeline][Scan] storageKey huerfano detectado: ${storageKey}`);
+      // Registrar evento de error con detalle explicativo
+      await custodyService.registerScanFailed(context.evidenceId, {
+        error: err.message,
+        reason: 'UPLOAD_INCOMPLETE',
+        storageKey
+      }).catch(e => console.warn('[Pipeline] No se pudo registrar SCAN_FAILED:', e.message));
+      throw err;
+    }
+
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (context.abortSignal?.aborted) throw new Error('Pipeline aborted');
       try {
@@ -210,7 +226,16 @@ class PipelineService {
         const fileInfo = await storageService.getFileInfo(context.originalFile.storageKey);
 
         if (!fileInfo.exists) {
-          throw new Error('Archivo original no encontrado en storage');
+          // Archivo no esta en S3 a pesar de tener storageKey definitivo.
+          // No tiene sentido reintentar: el archivo se perdio o nunca llego.
+          const err = new Error(`El archivo no esta disponible en almacenamiento (key=${storageKey}). El archivo pudo haberse perdido o la subida nunca se completo. Por favor, vuelva a subir el archivo.`);
+          err.code = 'FILE_NOT_IN_STORAGE';
+          await custodyService.registerScanFailed(context.evidenceId, {
+            error: err.message,
+            reason: 'FILE_NOT_IN_STORAGE',
+            storageKey
+          }).catch(e => console.warn('[Pipeline] No se pudo registrar SCAN_FAILED:', e.message));
+          throw err;
         }
 
         // Aqui iria la integracion con ClamAV para escaneo real
